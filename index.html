@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Детективная карточная игра</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Страница 1: Вход -->
+        <div id="login-page" class="page active">
+            <div class="login-container">
+                <h1 class="game-title">Детективная карточная игра</h1>
+                <div class="login-form">
+                    <input type="text" id="playerName" placeholder="Введите ваше имя" maxlength="20">
+                    <button id="joinGame" onclick="joinGame()">Присоединиться к игре</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Страница 2: Лобби -->
+        <div id="lobby-page" class="page">
+            <div class="lobby-container">
+                <h1>Лобби</h1>
+                <div id="playerNameDisplay" class="player-name-display"></div>
+                
+                <div class="role-selection">
+                    <h2>Выберите роль:</h2>
+                    <div class="role-buttons">
+                        <button id="playerRole" class="role-btn" onclick="selectRole('player')">Игрок</button>
+                        <button id="masterRole" class="role-btn" onclick="selectRole('master')">Мастер</button>
+                        <button id="bothRole" class="role-btn" onclick="selectRole('both')">Мастер+Игрок</button>
+                    </div>
+                    <div id="selectedRole" class="selected-role"></div>
+                </div>
+
+                <div class="lobby-controls">
+                    <button onclick="toggleRules()" class="control-btn">📋 Правила</button>
+                    <button onclick="shuffleTurnOrder()" class="control-btn">🎲 Перемешать порядок ходов</button>
+                    <button onclick="startGame()" class="control-btn start-btn">🎮 Начать игру</button>
+                </div>
+
+                <div id="turnOrder" class="turn-order"></div>
+                <div id="playersList" class="players-list"></div>
+            </div>
+        </div>
+
+        <!-- Страница 3: Игровой стол -->
+        <div id="game-page" class="page">
+            <div class="game-layout">
+                <!-- Верхняя панель -->
+                <div class="top-panel">
+                    <div class="game-title-bar">
+                        <span id="currentPlayerTurn" class="turn-indicator"></span>
+                        <div class="game-controls">
+                            <button onclick="toggleRules()" class="control-btn">📋 Правила</button>
+                            <button onclick="toggleBackstory()" class="control-btn">📖 Предыстория</button>
+                            <button id="endGameBtn" class="control-btn end-game-btn" onclick="endGameWarning()">🏁 Завершить игру</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Основная игровая зона -->
+                <div class="game-area">
+                    <!-- Колода -->
+                    <div class="deck-area">
+                        <div class="deck-stack" onclick="masterDrawCard()" title="Колода">
+                            <div class="deck-count" id="deckCount">32</div>
+                            <img src="cards/cover.png" alt="Колода" class="card-img" style="width: 139px; height: 228px;">
+                        </div>
+                        <div class="master-deck-controls" id="masterDeckControls" style="display: none;">
+                            <button onclick="shuffleDeck()" class="deck-btn">🔀 Перемешать</button>
+                            <button onclick="dealCards()" class="deck-btn">🎴 Раздать</button>
+                            <button onclick="drawFirstCard()" class="deck-btn">🃏 Достать первую карту</button>
+                        </div>
+                    </div>
+
+                    <!-- Игровой стол (карты на столе) -->
+                    <div class="table-area" id="tableCards">
+                        <h3>Стол</h3>
+                        <div id="tableCardsContainer" class="cards-grid"></div>
+                    </div>
+
+                    <!-- Сброс -->
+                    <div class="discard-area" id="discardArea">
+                        <h3>Сброс (<span id="discardCount">0</span>)</h3>
+                        <div class="discard-pile" id="discardPile" onclick="masterViewDiscard()">
+                            <div class="discard-placeholder">Стопка сброса</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Область просмотра мастера -->
+                <div id="masterViewArea" class="master-view" style="display: none;">
+                    <div class="master-tabs">
+                        <button onclick="masterViewHands()" class="master-tab-btn">Руки игроков</button>
+                        <button onclick="masterViewDiscard()" class="master-tab-btn">Сброс</button>
+                        <button onclick="masterViewDeck()" class="master-tab-btn">Колода</button>
+                    </div>
+                    <div id="masterViewContent" class="master-view-content"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Область руки игрока - компактная панель внизу -->
+        <div id="playerHandArea" class="player-hand-area" style="display: none;">
+            <div class="hand-toggle" onclick="toggleHand()">
+                <span>🃏 Карты в руке</span>
+                <span id="handCount">0</span>
+                <span id="turnStatus" class="turn-status">Ожидайте своего хода</span>
+            </div>
+            <div class="hand-content" id="handContent">
+                <div id="handCardsContainer" class="hand-cards-container"></div>
+                <button id="endTurnBtn" class="end-turn-btn" onclick="endTurn()" style="display: none;">
+                    Завершить ход
+                </button>
+            </div>
+        </div>
+
+        <!-- Модальные окна -->
+        <div id="confirmModal" class="modal">
+            <div class="modal-content">
+                <p id="modalMessage"></p>
+                <div class="modal-buttons">
+                    <button id="modalConfirm" class="modal-btn confirm-btn">Да</button>
+                    <button onclick="closeModal()" class="modal-btn cancel-btn">Отмена</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="cardModal" class="modal">
+            <div class="modal-content card-modal-content">
+                <img id="cardModalImage" src="" alt="Карта" class="card-modal-image">
+                <div id="cardModalActions" class="card-modal-actions"></div>
+                <button onclick="closeCardModal()" class="modal-btn cancel-btn">Закрыть</button>
+            </div>
+        </div>
+
+        <div id="infoModal" class="modal">
+            <div class="modal-content info-modal-content">
+                <div id="infoModalText"></div>
+                <button onclick="closeInfoModal()" class="modal-btn cancel-btn">Закрыть</button>
+            </div>
+        </div>
+
+        <div id="testModal" class="modal">
+            <div class="modal-content test-modal-content">
+                <h2>Финальный тест</h2>
+                <div id="testContainer"></div>
+                <button onclick="submitTest()" class="modal-btn confirm-btn">Завершить тест</button>
+            </div>
+        </div>
+
+        <div id="resultsModal" class="modal">
+            <div class="modal-content results-modal-content">
+                <h2>Результаты</h2>
+                <div id="resultsContainer"></div>
+                <button onclick="closeResultsModal()" class="modal-btn confirm-btn">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
