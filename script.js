@@ -9,35 +9,44 @@ const firebaseConfig = {
     appId: "1:371582003659:web:c9ab6512d3ff5fa3f6ee4e"
 };
 
-// Инициализация Firebase
-firebase.initializeApp(firebaseConfig);
-const database = firebase.database();
+// Инициализация Firebase с проверкой
+let database;
+let firebaseReady = false;
+
+try {
+    firebase.initializeApp(firebaseConfig);
+    database = firebase.database();
+    firebaseReady = true;
+    console.log('Firebase initialized successfully');
+} catch (error) {
+    console.error('Firebase initialization error:', error);
+    // Fallback к localStorage если Firebase не работает
+    firebaseReady = false;
+}
 
 // Уникальный ID комнаты
 const ROOM_ID = 'default-room';
 
 // Глобальные переменные
 let playerName = '';
-let playerRole = ''; // 'player', 'master', 'both'
+let playerRole = '';
 let players = [];
 let turnOrder = [];
 let currentTurnIndex = 0;
 let gameStarted = false;
 let cardsDealt = false;
 let firstCardDrawn = false;
-let playerMadeAction = false; // Отслеживает, сделал ли игрок действие в текущий ход
+let playerMadeAction = false;
 let lastLocalUpdate = null;
 
-// Карты (всего 32 карты)
+// Карты
 let deck = [];
 let discardPile = [];
 let tableCards = [];
-let playerHands = {}; // {playerName: [cardIds]}
-
-// Состояние карт
-let cardStates = {}; // {cardId: {onTable: false, owner: null}}
-const TRAP_CARDS = Array.from({length: 13}, (_, i) => i + 20); // Карты 20-32
-const FIRST_CARD = 1; // Фиксированная первая карта - 01.png
+let playerHands = {};
+let cardStates = {};
+const TRAP_CARDS = Array.from({length: 13}, (_, i) => i + 20);
+const FIRST_CARD = 1;
 
 // Тест
 const testQuestions = [
@@ -97,7 +106,6 @@ const testQuestions = [
 let notificationTimeout = null;
 
 function showNotification(message, type = 'info') {
-    // Удаляем старое уведомление если есть
     const oldNotification = document.querySelector('.game-notification');
     if (oldNotification) {
         oldNotification.remove();
@@ -112,47 +120,37 @@ function showNotification(message, type = 'info') {
     notification.textContent = message;
     document.body.appendChild(notification);
     
-    // Анимация появления
     setTimeout(() => notification.classList.add('show'), 10);
     
-    // Автоматическое скрытие
     notificationTimeout = setTimeout(() => {
         notification.classList.remove('show');
         setTimeout(() => notification.remove(), 300);
     }, 3000);
 }
 
-// Загрузка состояния игры из Firebase
-function loadGameState() {
-    return new Promise((resolve) => {
-        database.ref(`rooms/${ROOM_ID}/gameState`).once('value', (snapshot) => {
-            const state = snapshot.val();
-            if (state && !state.gameEnded) {
-                // Восстанавливаем глобальные переменные
-                playerName = state.playerName || '';
-                playerRole = state.playerRole || '';
-                players = state.players || [];
-                turnOrder = state.turnOrder || [];
-                currentTurnIndex = state.currentTurnIndex || 0;
-                gameStarted = state.gameStarted || false;
-                cardsDealt = state.cardsDealt || false;
-                firstCardDrawn = state.firstCardDrawn || false;
-                deck = state.deck || [];
-                discardPile = state.discardPile || [];
-                tableCards = state.tableCards || [];
-                playerHands = state.playerHands || {};
-                cardStates = state.cardStates || {};
-                playerMadeAction = state.playerMadeAction || false;
+// Функции для работы с данными
+function loadGameStateFirebase() {
+    return new Promise((resolve, reject) => {
+        if (!firebaseReady || !database) {
+            reject(new Error('Firebase not ready'));
+            return;
+        }
+        
+        database.ref(`rooms/${ROOM_ID}/gameState`).once('value')
+            .then((snapshot) => {
+                const state = snapshot.val();
                 resolve(state);
-            } else {
-                resolve(null);
-            }
-        });
+            })
+            .catch((error) => {
+                console.error('Firebase load error:', error);
+                reject(error);
+            });
     });
 }
 
-// Сохранение состояния игры в Firebase
-function saveGameState() {
+function saveGameStateFirebase() {
+    if (!firebaseReady || !database) return;
+    
     const state = {
         playerName,
         playerRole,
@@ -171,28 +169,55 @@ function saveGameState() {
         gameEnded: false,
         lastUpdated: firebase.database.ServerValue.TIMESTAMP
     };
-    database.ref(`rooms/${ROOM_ID}/gameState`).set(state);
-}
-
-// Сохранение с отметкой времени
-function saveGameStateFirebase() {
+    
     lastLocalUpdate = Date.now();
-    saveGameState();
+    database.ref(`rooms/${ROOM_ID}/gameState`).set(state)
+        .catch(error => console.error('Firebase save error:', error));
 }
 
-// Подписка на обновления для синхронизации между игроками
+function saveToLocalStorage() {
+    const state = {
+        playerName,
+        playerRole,
+        players,
+        turnOrder,
+        currentTurnIndex,
+        gameStarted,
+        cardsDealt,
+        firstCardDrawn,
+        deck,
+        discardPile,
+        tableCards,
+        playerHands,
+        cardStates,
+        playerMadeAction,
+        gameEnded: false
+    };
+    localStorage.setItem('detectiveGame', JSON.stringify(state));
+}
+
+function loadFromLocalStorage() {
+    const saved = localStorage.getItem('detectiveGame');
+    if (saved) {
+        const state = JSON.parse(saved);
+        if (!state.gameEnded) {
+            return state;
+        }
+    }
+    return null;
+}
+
 function subscribeToGameUpdates() {
+    if (!firebaseReady || !database) return;
+    
     database.ref(`rooms/${ROOM_ID}/gameState`).on('value', (snapshot) => {
         const state = snapshot.val();
         if (!state || state.gameEnded) return;
         
-        // Не обновляем, если это наши собственные изменения
         if (state.lastUpdated && lastLocalUpdate && 
             state.lastUpdated <= lastLocalUpdate) return;
         
-        // Обновляем UI только если мы не на странице входа
         if (playerName && state.gameStarted) {
-            // Восстанавливаем состояние
             players = state.players || [];
             turnOrder = state.turnOrder || [];
             currentTurnIndex = state.currentTurnIndex || 0;
@@ -211,41 +236,86 @@ function subscribeToGameUpdates() {
             players = state.players || [];
             updateLobbyUI();
         }
+    }, (error) => {
+        console.error('Firebase subscription error:', error);
     });
 }
 
 // Инициализация
 async function init() {
-    // Загружаем данные из Firebase
-    const saved = await loadGameState();
+    console.log('Init started, Firebase ready:', firebaseReady);
     
-    // Проверяем, есть ли активная сессия
+    let saved = null;
+    
+    // Пробуем загрузить из Firebase
+    if (firebaseReady) {
+        try {
+            saved = await loadGameStateFirebase();
+        } catch (error) {
+            console.log('Failed to load from Firebase, trying localStorage');
+        }
+    }
+    
+    // Если Firebase не сработал, пробуем localStorage
+    if (!saved) {
+        saved = loadFromLocalStorage();
+    }
+    
+    // Восстанавливаем состояние
     if (saved && saved.gameStarted && !saved.gameEnded) {
-        playerName = saved.playerName;
-        playerRole = saved.playerRole;
+        restoreState(saved);
         showGamePage();
     } else if (saved && saved.playerName && !saved.gameStarted) {
-        playerName = saved.playerName;
-        playerRole = saved.playerRole;
+        restoreState(saved);
         showLobbyPage();
         updateLobbyUI();
     } else {
         showLoginPage();
     }
     
-    // Подписываемся на обновления в реальном времени
-    subscribeToGameUpdates();
+    // Подписываемся на обновления Firebase
+    if (firebaseReady) {
+        subscribeToGameUpdates();
+    }
 }
 
-// Навигация по страницам
+function restoreState(state) {
+    playerName = state.playerName || '';
+    playerRole = state.playerRole || '';
+    players = state.players || [];
+    turnOrder = state.turnOrder || [];
+    currentTurnIndex = state.currentTurnIndex || 0;
+    gameStarted = state.gameStarted || false;
+    cardsDealt = state.cardsDealt || false;
+    firstCardDrawn = state.firstCardDrawn || false;
+    deck = state.deck || [];
+    discardPile = state.discardPile || [];
+    tableCards = state.tableCards || [];
+    playerHands = state.playerHands || {};
+    cardStates = state.cardStates || {};
+    playerMadeAction = state.playerMadeAction || false;
+}
+
+function saveGameState() {
+    if (firebaseReady) {
+        saveGameStateFirebase();
+    }
+    saveToLocalStorage();
+}
+
+// Навигация
 function showPage(pageId) {
     document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
-    document.getElementById(pageId).classList.add('active');
+    const page = document.getElementById(pageId);
+    if (page) {
+        page.classList.add('active');
+    }
 }
 
 function showLoginPage() {
     showPage('login-page');
-    document.getElementById('playerName').value = '';
+    const input = document.getElementById('playerName');
+    if (input) input.value = '';
 }
 
 function showLobbyPage() {
@@ -261,6 +331,11 @@ function showGamePage() {
 // Страница входа
 function joinGame() {
     const nameInput = document.getElementById('playerName');
+    if (!nameInput) {
+        console.error('Input not found');
+        return;
+    }
+    
     const name = nameInput.value.trim();
     
     if (!name) {
@@ -270,12 +345,10 @@ function joinGame() {
     
     playerName = name;
     
-    // Добавляем игрока в список, если его там нет
     if (!players.includes(name)) {
         players.push(name);
     }
     
-    // Если это первый игрок, сбрасываем состояние
     if (players.length === 1) {
         gameStarted = false;
         cardsDealt = false;
@@ -290,49 +363,55 @@ function joinGame() {
         playerMadeAction = false;
     }
     
-    saveGameStateFirebase();
+    saveGameState();
     showLobbyPage();
+    showNotification(`Добро пожаловать, ${name}!`, 'success');
 }
 
-// Выход из игры
 function leaveGame() {
-    // Удаляем игрока из списка
     players = players.filter(p => p !== playerName);
     
-    // Если игроков не осталось, удаляем комнату
-    if (players.length === 0) {
+    if (players.length === 0 && firebaseReady) {
         database.ref(`rooms/${ROOM_ID}`).remove();
     } else {
-        saveGameStateFirebase();
+        saveGameState();
     }
     
-    // Сбрасываем локальные данные
     playerName = '';
     playerRole = '';
     
     showLoginPage();
+    showNotification('Вы покинули игру', 'info');
 }
 
 // Страница лобби
 function selectRole(role) {
     playerRole = role;
     
-    // Обновляем UI кнопок
     document.querySelectorAll('.role-btn').forEach(btn => btn.classList.remove('selected'));
-    document.getElementById(role + 'Role').classList.add('selected');
+    const roleBtn = document.getElementById(role + 'Role');
+    if (roleBtn) roleBtn.classList.add('selected');
     
-    document.getElementById('selectedRole').textContent = `Выбрана роль: ${role === 'player' ? 'Игрок' : role === 'master' ? 'Мастер' : 'Мастер+Игрок'}`;
+    const selectedRoleEl = document.getElementById('selectedRole');
+    if (selectedRoleEl) {
+        selectedRoleEl.textContent = `Выбрана роль: ${role === 'player' ? 'Игрок' : role === 'master' ? 'Мастер' : 'Мастер+Игрок'}`;
+    }
     
-    saveGameStateFirebase();
+    saveGameState();
 }
 
 function updateLobbyUI() {
-    document.getElementById('playerNameDisplay').textContent = `Игрок: ${playerName}`;
+    const nameDisplay = document.getElementById('playerNameDisplay');
+    if (nameDisplay) nameDisplay.textContent = `Игрок: ${playerName}`;
     
     if (playerRole) {
-        document.getElementById('selectedRole').textContent = 
-            `Выбрана роль: ${playerRole === 'player' ? 'Игрок' : playerRole === 'master' ? 'Мастер' : 'Мастер+Игрок'}`;
-        document.getElementById(playerRole + 'Role')?.classList.add('selected');
+        const selectedRoleEl = document.getElementById('selectedRole');
+        if (selectedRoleEl) {
+            selectedRoleEl.textContent = 
+                `Выбрана роль: ${playerRole === 'player' ? 'Игрок' : playerRole === 'master' ? 'Мастер' : 'Мастер+Игрок'}`;
+        }
+        const roleBtn = document.getElementById(playerRole + 'Role');
+        if (roleBtn) roleBtn.classList.add('selected');
     }
     
     updatePlayersList();
@@ -340,8 +419,10 @@ function updateLobbyUI() {
 
 function updatePlayersList() {
     const listDiv = document.getElementById('playersList');
-    listDiv.innerHTML = '<h3>Игроки в лобби:</h3>' + 
-        players.map(p => `<div>• ${p}${p === playerName ? ' (Вы)' : ''}</div>`).join('');
+    if (listDiv) {
+        listDiv.innerHTML = '<h3>Игроки в лобби:</h3>' + 
+            players.map(p => `<div>• ${p}${p === playerName ? ' (Вы)' : ''}</div>`).join('');
+    }
 }
 
 function shuffleTurnOrder() {
@@ -353,11 +434,13 @@ function shuffleTurnOrder() {
     turnOrder = [...players].sort(() => Math.random() - 0.5);
     
     const orderDiv = document.getElementById('turnOrder');
-    orderDiv.innerHTML = '<h3>Порядок ходов:</h3>' + 
-        turnOrder.map((p, i) => `<div>${i + 1}. ${p}</div>`).join('');
+    if (orderDiv) {
+        orderDiv.innerHTML = '<h3>Порядок ходов:</h3>' + 
+            turnOrder.map((p, i) => `<div>${i + 1}. ${p}</div>`).join('');
+    }
     
     showNotification('Порядок ходов перемешан!', 'success');
-    saveGameStateFirebase();
+    saveGameState();
 }
 
 function startGame() {
@@ -370,33 +453,27 @@ function startGame() {
         gameStarted = true;
         initializeDeck();
         
-        // Автоматически устанавливаем очередь ходов, если она не установлена
         if (turnOrder.length === 0) {
             turnOrder = [...players];
         }
         
-        // Устанавливаем первого игрока
         currentTurnIndex = 0;
         playerMadeAction = false;
         
-        saveGameStateFirebase();
+        saveGameState();
         showGamePage();
     });
 }
 
 function initializeDeck() {
-    // Создаем колоду из 32 карт, но убираем карту 01
-    deck = Array.from({length: 31}, (_, i) => i + 2); // Карты с 02 по 32
-    // Перемешиваем колоду
+    deck = Array.from({length: 31}, (_, i) => i + 2);
     deck.sort(() => Math.random() - 0.5);
     
-    // Инициализируем состояния карт
     cardStates = {};
     for (let i = 1; i <= 32; i++) {
         cardStates[i] = {onTable: false, owner: null};
     }
     
-    // Очищаем руки игроков
     playerHands = {};
     players.forEach(p => {
         playerHands[p] = [];
@@ -408,7 +485,6 @@ function initializeDeck() {
     firstCardDrawn = false;
     playerMadeAction = false;
     
-    // Автоматически кладем карту 01 на стол
     placeFirstCard();
 }
 
@@ -420,31 +496,24 @@ function placeFirstCard() {
 
 // Игровая страница
 function updateGameUI() {
-    // Показываем/скрываем элементы в зависимости от роли
     const isMasterRole = isMaster();
     const isPlayerRole = isPlayer();
     
-    document.getElementById('masterDeckControls').style.display = isMasterRole ? 'flex' : 'none';
-    document.getElementById('masterViewArea').style.display = isMasterRole ? 'block' : 'none';
-    document.getElementById('endGameBtn').style.display = isMasterRole ? 'inline-block' : 'none';
-    document.getElementById('playerHandArea').style.display = isPlayerRole ? 'block' : 'none';
+    const masterControls = document.getElementById('masterDeckControls');
+    const masterView = document.getElementById('masterViewArea');
+    const endGameBtn = document.getElementById('endGameBtn');
+    const playerHand = document.getElementById('playerHandArea');
     
-    // Обновляем индикатор хода
+    if (masterControls) masterControls.style.display = isMasterRole ? 'flex' : 'none';
+    if (masterView) masterView.style.display = isMasterRole ? 'block' : 'none';
+    if (endGameBtn) endGameBtn.style.display = isMasterRole ? 'inline-block' : 'none';
+    if (playerHand) playerHand.style.display = isPlayerRole ? 'block' : 'none';
+    
     updateTurnIndicator();
-    
-    // Обновляем колоду
     updateDeckDisplay();
-    
-    // Обновляем стол
     updateTableDisplay();
-    
-    // Обновляем руку игрока
     updateHandDisplay();
-    
-    // Обновляем сброс
     updateDiscardDisplay();
-    
-    // Обновляем состояние кнопок мастера
     updateMasterButtons();
 }
 
@@ -478,28 +547,32 @@ function updateMasterButtons() {
 }
 
 function updateTurnIndicator() {
+    const indicator = document.getElementById('currentPlayerTurn');
+    if (!indicator) return;
+    
     if (turnOrder.length > 0 && currentTurnIndex < turnOrder.length) {
         const currentPlayer = turnOrder[currentTurnIndex];
-        document.getElementById('currentPlayerTurn').textContent = 
-            `Ходит: ${currentPlayer} ${currentPlayer === playerName ? '(Вы)' : ''}`;
+        indicator.textContent = `Ходит: ${currentPlayer} ${currentPlayer === playerName ? '(Вы)' : ''}`;
     } else if (turnOrder.length > 0) {
-        document.getElementById('currentPlayerTurn').textContent = 'Ожидание игроков...';
+        indicator.textContent = 'Ожидание игроков...';
     }
 }
 
 function updateDeckDisplay() {
-    document.getElementById('deckCount').textContent = deck.length;
+    const deckCount = document.getElementById('deckCount');
+    if (deckCount) deckCount.textContent = deck.length;
     
-    // Подсветка первой карты
-    const firstCardElement = document.querySelector('.deck-stack');
-    if (firstCardElement && firstCardDrawn) {
-        firstCardElement.style.boxShadow = '0 0 15px rgba(76, 175, 80, 0.8)';
-        firstCardElement.style.border = '2px solid #4CAF50';
+    const deckStack = document.querySelector('.deck-stack');
+    if (deckStack && firstCardDrawn) {
+        deckStack.style.boxShadow = '0 0 15px rgba(76, 175, 80, 0.8)';
+        deckStack.style.border = '2px solid #4CAF50';
     }
 }
 
 function updateTableDisplay() {
     const container = document.getElementById('tableCardsContainer');
+    if (!container) return;
+    
     container.innerHTML = tableCards.map(cardId => {
         return `<div class="card-in-grid" onclick="viewTableCard(${cardId})">
             <img src="cards/${String(cardId).padStart(2, '0')}.png" 
@@ -517,12 +590,15 @@ function updateHandDisplay() {
     
     const hand = playerHands[playerName] || [];
     const container = document.getElementById('handCardsContainer');
-    document.getElementById('handCount').textContent = hand.length;
+    const handCount = document.getElementById('handCount');
+    
+    if (handCount) handCount.textContent = hand.length;
+    if (!container) return;
     
     if (hand.length === 0) {
         container.innerHTML = '<div class="empty-hand">У вас пока нет карт</div>';
     } else {
-        container.innerHTML = hand.map((cardId, index) => {
+        container.innerHTML = hand.map((cardId) => {
             return `<div class="card-in-hand" onclick="viewHandCard(${cardId})">
                 <img src="cards/${String(cardId).padStart(2, '0')}.png" 
                      alt="Карта ${cardId}" 
@@ -533,24 +609,29 @@ function updateHandDisplay() {
         }).join('');
     }
     
-    // Обновляем кнопку завершения хода
     const endTurnBtn = document.getElementById('endTurnBtn');
     const statusIndicator = document.getElementById('turnStatus');
     
     if (isMyTurn()) {
         if (playerMadeAction) {
-            endTurnBtn.style.display = 'block';
-            statusIndicator.textContent = 'Вы сделали ход';
-            statusIndicator.style.color = '#4CAF50';
+            if (endTurnBtn) endTurnBtn.style.display = 'block';
+            if (statusIndicator) {
+                statusIndicator.textContent = 'Вы сделали ход';
+                statusIndicator.style.color = '#4CAF50';
+            }
         } else {
-            endTurnBtn.style.display = 'none';
-            statusIndicator.textContent = 'Выберите карту для хода';
-            statusIndicator.style.color = '#ffd700';
+            if (endTurnBtn) endTurnBtn.style.display = 'none';
+            if (statusIndicator) {
+                statusIndicator.textContent = 'Выберите карту для хода';
+                statusIndicator.style.color = '#ffd700';
+            }
         }
     } else {
-        endTurnBtn.style.display = 'none';
-        statusIndicator.textContent = 'Ожидайте своего хода';
-        statusIndicator.style.color = '#888';
+        if (endTurnBtn) endTurnBtn.style.display = 'none';
+        if (statusIndicator) {
+            statusIndicator.textContent = 'Ожидайте своего хода';
+            statusIndicator.style.color = '#888';
+        }
     }
 }
 
@@ -558,12 +639,10 @@ function updateDiscardDisplay() {
     const discardCountElement = document.getElementById('discardCount');
     const discardPileElement = document.getElementById('discardPile');
     
-    // Обновляем счетчик
     if (discardCountElement) {
         discardCountElement.textContent = discardPile.length;
     }
     
-    // Обновляем отображение стопки сброса
     if (discardPileElement) {
         if (discardPile.length > 0) {
             discardPileElement.innerHTML = `
@@ -582,13 +661,12 @@ function updateDiscardDisplay() {
     }
 }
 
-// Проверка хода
 function isMyTurn() {
     if (turnOrder.length === 0) return false;
     return turnOrder[currentTurnIndex] === playerName;
 }
 
-// Действия мастера с колодой
+// Действия мастера
 function shuffleDeck() {
     if (!isMaster()) return;
     if (cardsDealt) {
@@ -598,14 +676,13 @@ function shuffleDeck() {
     
     deck.sort(() => Math.random() - 0.5);
     
-    // Добавляем анимацию перемешивания
     const deckElement = document.querySelector('.deck-stack');
     if (deckElement) {
         deckElement.classList.add('shuffle-animation');
         setTimeout(() => deckElement.classList.remove('shuffle-animation'), 1000);
     }
     
-    saveGameStateFirebase();
+    saveGameState();
     updateDeckDisplay();
     showNotification('Колода перемешана!', 'success');
 }
@@ -614,7 +691,6 @@ function dealCards() {
     if (!isMaster()) return;
     
     if (cardsDealt) {
-        // Трясем кнопку если карты уже розданы
         const dealBtn = document.querySelector('.deck-btn[onclick="dealCards()"]');
         if (dealBtn) {
             dealBtn.classList.add('shake');
@@ -629,7 +705,6 @@ function dealCards() {
         return;
     }
     
-    // Раздаем по 3 карты каждому игроку
     players.forEach(player => {
         playerHands[player] = [];
         for (let i = 0; i < 3; i++) {
@@ -640,7 +715,7 @@ function dealCards() {
     });
     
     cardsDealt = true;
-    saveGameStateFirebase();
+    saveGameState();
     updateGameUI();
     showNotification('Карты розданы!', 'success');
 }
@@ -655,7 +730,7 @@ function drawFirstCard() {
     firstCardDrawn = true;
     placeFirstCard();
     
-    saveGameStateFirebase();
+    saveGameState();
     updateGameUI();
     showNotification('Первая карта выложена на стол', 'success');
 }
@@ -671,7 +746,7 @@ function masterDrawCard() {
     tableCards.push(card);
     cardStates[card].onTable = true;
     
-    saveGameStateFirebase();
+    saveGameState();
     updateGameUI();
 }
 
@@ -684,7 +759,6 @@ function viewHandCard(cardId) {
     const isPlayerRole = playerRole === 'player' || playerRole === 'both';
     if (!isPlayerRole) return;
     
-    // Проверяем, действительно ли карта в руке игрока
     const hand = playerHands[playerName] || [];
     if (hand.includes(cardId)) {
         showCardModal(cardId, true);
@@ -695,6 +769,8 @@ function showCardModal(cardId, showActions = false) {
     const modal = document.getElementById('cardModal');
     const image = document.getElementById('cardModalImage');
     const actions = document.getElementById('cardModalActions');
+    
+    if (!modal || !image || !actions) return;
     
     image.src = `cards/${String(cardId).padStart(2, '0')}.png`;
     image.onerror = () => { image.src = 'cards/cover.png'; };
@@ -720,54 +796,46 @@ function showCardModal(cardId, showActions = false) {
 }
 
 function closeCardModal() {
-    document.getElementById('cardModal').style.display = 'none';
+    const modal = document.getElementById('cardModal');
+    if (modal) modal.style.display = 'none';
 }
 
-// Действия с картами
 function playCard(cardId) {
-    // Закрываем модальное окно с картой
     closeCardModal();
     
-    // Показываем подтверждение
     showConfirmModal('Вы уверены, что хотите выложить эту карту на стол?', () => {
-        // Убираем карту из руки игрока
         const hand = playerHands[playerName];
         const index = hand.indexOf(cardId);
         if (index > -1) {
             hand.splice(index, 1);
         }
         
-        // Добавляем на стол
         tableCards.push(cardId);
         cardStates[cardId].onTable = true;
         cardStates[cardId].owner = null;
         
         playerMadeAction = true;
-        saveGameStateFirebase();
+        saveGameState();
         updateGameUI();
         showNotification('Карта выложена на стол', 'success');
     });
 }
 
 function discardCard(cardId) {
-    // Закрываем модальное окно с картой
     closeCardModal();
     
-    // Показываем подтверждение
     showConfirmModal('Вы уверены, что хотите сбросить эту карту?', () => {
-        // Убираем карту из руки игрока
         const hand = playerHands[playerName];
         const index = hand.indexOf(cardId);
         if (index > -1) {
             hand.splice(index, 1);
         }
         
-        // Добавляем в сброс
         discardPile.push(cardId);
         cardStates[cardId].owner = null;
         
         playerMadeAction = true;
-        saveGameStateFirebase();
+        saveGameState();
         updateGameUI();
         showNotification('Карта сброшена', 'info');
     });
@@ -787,7 +855,6 @@ function endTurn() {
         return;
     }
     
-    // Добираем карту, если есть
     if (deck.length > 0) {
         const hand = playerHands[playerName];
         const card = deck.pop();
@@ -796,11 +863,10 @@ function endTurn() {
         showNotification('Вы добрали карту из колоды', 'info');
     }
     
-    // Передаем ход следующему игроку
     currentTurnIndex = (currentTurnIndex + 1) % turnOrder.length;
-    playerMadeAction = false; // Сбрасываем для следующего игрока
+    playerMadeAction = false;
     
-    saveGameStateFirebase();
+    saveGameState();
     updateGameUI();
     showNotification(`Ход переходит к ${turnOrder[currentTurnIndex]}`, 'info');
 }
@@ -810,6 +876,8 @@ function masterViewHands() {
     if (!isMaster()) return;
     
     const container = document.getElementById('masterViewContent');
+    if (!container) return;
+    
     container.innerHTML = '<h3>Руки игроков</h3>';
     
     players.forEach(player => {
@@ -837,6 +905,8 @@ function masterViewDiscard() {
     if (!isMaster()) return;
     
     const container = document.getElementById('masterViewContent');
+    if (!container) return;
+    
     container.innerHTML = `<h3>Сброс (${discardPile.length} карт)</h3>
         <div class="cards-grid">
             ${discardPile.length > 0 ? discardPile.map(cardId => `
@@ -855,6 +925,8 @@ function masterViewDeck() {
     if (!isMaster()) return;
     
     const container = document.getElementById('masterViewContent');
+    if (!container) return;
+    
     container.innerHTML = `<h3>Колода (${deck.length} карт)</h3>
         <div class="cards-grid">
             ${deck.map(cardId => `
@@ -870,10 +942,11 @@ function masterViewDeck() {
 }
 
 function viewMasterCard(cardId) {
-    // Показываем карту в модальном окне для мастера
     const modal = document.getElementById('cardModal');
     const image = document.getElementById('cardModalImage');
     const actions = document.getElementById('cardModalActions');
+    
+    if (!modal || !image || !actions) return;
     
     image.src = `cards/${String(cardId).padStart(2, '0')}.png`;
     image.onerror = () => { image.src = 'cards/cover.png'; };
@@ -897,6 +970,8 @@ function showTest() {
     const modal = document.getElementById('testModal');
     const container = document.getElementById('testContainer');
     
+    if (!modal || !container) return;
+    
     container.innerHTML = testQuestions.map((q, i) => `
         <div style="margin-bottom: 20px;">
             <p><strong>${q.question}</strong></p>
@@ -914,14 +989,11 @@ function showTest() {
 }
 
 function selectTestOption(label) {
-    // Убираем выделение со всех опций в этой группе
     const allLabels = label.parentElement.querySelectorAll('.test-option');
     allLabels.forEach(l => l.classList.remove('selected'));
     
-    // Выделяем выбранную опцию
     label.classList.add('selected');
     
-    // Отмечаем radio
     const radio = label.querySelector('input[type="radio"]');
     if (radio) {
         radio.checked = true;
@@ -929,7 +1001,6 @@ function selectTestOption(label) {
 }
 
 function submitTest() {
-    // Подсчитываем очки
     let score = 0;
     
     testQuestions.forEach((q, i) => {
@@ -939,23 +1010,23 @@ function submitTest() {
         }
     });
     
-    // Подсчитываем карты-ловушки на столе
     let trapCardsOnTable = tableCards.filter(cardId => TRAP_CARDS.includes(cardId)).length;
     score -= trapCardsOnTable;
     
-    // Подсчитываем недостающие карты в сбросе
     let discardDeficit = Math.max(0, 6 - discardPile.length);
     score -= discardDeficit * 3;
     
-    // Показываем результаты
     showResults(score);
     
-    document.getElementById('testModal').style.display = 'none';
+    const testModal = document.getElementById('testModal');
+    if (testModal) testModal.style.display = 'none';
 }
 
 function showResults(score) {
     const modal = document.getElementById('resultsModal');
     const container = document.getElementById('resultsContainer');
+    
+    if (!modal || !container) return;
     
     container.innerHTML = `
         <p>Игра завершена!</p>
@@ -971,17 +1042,18 @@ function showResults(score) {
 }
 
 function finalizeGameEnd() {
-    document.getElementById('resultsModal').style.display = 'none';
+    const modal = document.getElementById('resultsModal');
+    if (modal) modal.style.display = 'none';
     resetGame();
 }
 
 function closeResultsModal() {
-    document.getElementById('resultsModal').style.display = 'none';
+    const modal = document.getElementById('resultsModal');
+    if (modal) modal.style.display = 'none';
     resetGame();
 }
 
 function resetGame() {
-    // Полностью сбрасываем игру
     gameStarted = false;
     cardsDealt = false;
     firstCardDrawn = false;
@@ -997,12 +1069,14 @@ function resetGame() {
     players = [];
     playerMadeAction = false;
     
-    // Помечаем игру как завершенную и очищаем Firebase
     const state = { gameEnded: true };
-    database.ref(`rooms/${ROOM_ID}/gameState`).set(state);
-    database.ref(`rooms/${ROOM_ID}`).remove();
+    localStorage.setItem('detectiveGame', JSON.stringify(state));
     
-    // Показываем страницу входа
+    if (firebaseReady && database) {
+        database.ref(`rooms/${ROOM_ID}/gameState`).set(state);
+        database.ref(`rooms/${ROOM_ID}`).remove();
+    }
+    
     showLoginPage();
 }
 
@@ -1016,24 +1090,29 @@ function isPlayer() {
 }
 
 function showConfirmModal(message, onConfirm) {
-    // Закрываем другие модальные окна
-    document.getElementById('cardModal').style.display = 'none';
+    const cardModal = document.getElementById('cardModal');
+    if (cardModal) cardModal.style.display = 'none';
     
     const modal = document.getElementById('confirmModal');
-    document.getElementById('modalMessage').textContent = message;
-    
+    const messageEl = document.getElementById('modalMessage');
     const confirmBtn = document.getElementById('modalConfirm');
+    
+    if (!modal || !messageEl || !confirmBtn) return;
+    
+    messageEl.textContent = message;
+    
     confirmBtn.onclick = () => {
         modal.style.display = 'none';
         onConfirm();
     };
     
     modal.style.display = 'block';
-    modal.style.zIndex = '2000'; // Поверх карточки
+    modal.style.zIndex = '2000';
 }
 
 function closeModal() {
-    document.getElementById('confirmModal').style.display = 'none';
+    const modal = document.getElementById('confirmModal');
+    if (modal) modal.style.display = 'none';
 }
 
 function toggleRules() {
@@ -1057,17 +1136,24 @@ function toggleBackstory() {
 
 function showInfoModal(title, content) {
     const modal = document.getElementById('infoModal');
-    document.getElementById('infoModalText').innerHTML = `<h2>${title}</h2>${content}`;
+    const textEl = document.getElementById('infoModalText');
+    
+    if (!modal || !textEl) return;
+    
+    textEl.innerHTML = `<h2>${title}</h2>${content}`;
     modal.style.display = 'block';
 }
 
 function closeInfoModal() {
-    document.getElementById('infoModal').style.display = 'none';
+    const modal = document.getElementById('infoModal');
+    if (modal) modal.style.display = 'none';
 }
 
 function toggleHand() {
     const handContent = document.getElementById('handContent');
-    handContent.classList.toggle('show');
+    if (handContent) {
+        handContent.classList.toggle('show');
+    }
 }
 
 // Закрытие модальных окон при клике вне их
@@ -1077,5 +1163,22 @@ window.onclick = function(event) {
     }
 }
 
-// Инициализация при загрузке
-window.onload = init;
+// Запуск при загрузке
+window.onload = function() {
+    console.log('Page loaded, starting init...');
+    init().catch(error => {
+        console.error('Init error:', error);
+        // Если Firebase не работает, пробуем localStorage
+        const saved = loadFromLocalStorage();
+        if (saved && saved.playerName) {
+            restoreState(saved);
+            if (saved.gameStarted) {
+                showGamePage();
+            } else {
+                showLobbyPage();
+            }
+        } else {
+            showLoginPage();
+        }
+    });
+};
