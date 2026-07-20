@@ -20,16 +20,16 @@ try {
     console.log('Firebase initialized successfully');
 } catch (error) {
     console.error('Firebase initialization error:', error);
-    // Fallback к localStorage если Firebase не работает
     firebaseReady = false;
 }
 
 // Уникальный ID комнаты
 const ROOM_ID = 'default-room';
 
-// Глобальные переменные
+// Глобальные переменные ДЛЯ КОНКРЕТНОГО ИГРОКА
 let playerName = '';
 let playerRole = '';
+let playerId = ''; // Уникальный ID игрока
 let players = [];
 let turnOrder = [];
 let currentTurnIndex = 0;
@@ -43,7 +43,7 @@ let lastLocalUpdate = null;
 let deck = [];
 let discardPile = [];
 let tableCards = [];
-let playerHands = {};
+let playerHands = {}; // {playerId: [cardIds]}
 let cardStates = {};
 const TRAP_CARDS = Array.from({length: 13}, (_, i) => i + 20);
 const FIRST_CARD = 1;
@@ -128,7 +128,12 @@ function showNotification(message, type = 'info') {
     }, 3000);
 }
 
-// Функции для работы с данными
+// Генерация уникального ID
+function generatePlayerId() {
+    return 'player_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now();
+}
+
+// Загрузка состояния ИГРЫ из Firebase (общие данные)
 function loadGameStateFirebase() {
     return new Promise((resolve, reject) => {
         if (!firebaseReady || !database) {
@@ -148,12 +153,11 @@ function loadGameStateFirebase() {
     });
 }
 
-function saveGameStateFirebase() {
+// Сохранение состояния ИГРЫ в Firebase (общие данные)
+function saveGameStateToFirebase() {
     if (!firebaseReady || !database) return;
     
     const state = {
-        playerName,
-        playerRole,
         players,
         turnOrder,
         currentTurnIndex,
@@ -175,8 +179,72 @@ function saveGameStateFirebase() {
         .catch(error => console.error('Firebase save error:', error));
 }
 
+// Сохранение данных КОНКРЕТНОГО ИГРОКА
+function savePlayerData() {
+    if (!firebaseReady || !database || !playerId) return;
+    
+    const playerData = {
+        name: playerName,
+        role: playerRole,
+        lastSeen: firebase.database.ServerValue.TIMESTAMP
+    };
+    
+    database.ref(`rooms/${ROOM_ID}/players/${playerId}`).set(playerData)
+        .catch(error => console.error('Firebase player save error:', error));
+    
+    // Удаляем данные игрока при отключении
+    database.ref(`rooms/${ROOM_ID}/players/${playerId}`).onDisconnect().remove();
+}
+
+// Подписка на обновления игры
+function subscribeToGameUpdates() {
+    if (!firebaseReady || !database) return;
+    
+    database.ref(`rooms/${ROOM_ID}/gameState`).on('value', (snapshot) => {
+        const state = snapshot.val();
+        if (!state || state.gameEnded) return;
+        
+        if (state.lastUpdated && lastLocalUpdate && 
+            state.lastUpdated <= lastLocalUpdate) return;
+        
+        // Обновляем общие данные
+        players = state.players || [];
+        turnOrder = state.turnOrder || [];
+        currentTurnIndex = state.currentTurnIndex || 0;
+        gameStarted = state.gameStarted;
+        cardsDealt = state.cardsDealt || false;
+        firstCardDrawn = state.firstCardDrawn || false;
+        deck = state.deck || [];
+        discardPile = state.discardPile || [];
+        tableCards = state.tableCards || [];
+        playerHands = state.playerHands || {};
+        cardStates = state.cardStates || {};
+        playerMadeAction = state.playerMadeAction || false;
+        
+        if (gameStarted) {
+            updateGameUI();
+        }
+    }, (error) => {
+        console.error('Firebase subscription error:', error);
+    });
+    
+    // Подписка на список игроков
+    database.ref(`rooms/${ROOM_ID}/players`).on('value', (snapshot) => {
+        const playersData = snapshot.val() || {};
+        const currentPlayers = Object.values(playersData).map(p => p.name);
+        
+        // Обновляем список игроков если мы в лобби
+        if (!gameStarted) {
+            players = currentPlayers;
+            updateLobbyUI();
+        }
+    });
+}
+
+// Сохранение в localStorage (для оффлайн режима)
 function saveToLocalStorage() {
     const state = {
+        playerId,
         playerName,
         playerRole,
         players,
@@ -207,81 +275,70 @@ function loadFromLocalStorage() {
     return null;
 }
 
-function subscribeToGameUpdates() {
-    if (!firebaseReady || !database) return;
-    
-    database.ref(`rooms/${ROOM_ID}/gameState`).on('value', (snapshot) => {
-        const state = snapshot.val();
-        if (!state || state.gameEnded) return;
-        
-        if (state.lastUpdated && lastLocalUpdate && 
-            state.lastUpdated <= lastLocalUpdate) return;
-        
-        if (playerName && state.gameStarted) {
-            players = state.players || [];
-            turnOrder = state.turnOrder || [];
-            currentTurnIndex = state.currentTurnIndex || 0;
-            gameStarted = state.gameStarted;
-            cardsDealt = state.cardsDealt || false;
-            firstCardDrawn = state.firstCardDrawn || false;
-            deck = state.deck || [];
-            discardPile = state.discardPile || [];
-            tableCards = state.tableCards || [];
-            playerHands = state.playerHands || {};
-            cardStates = state.cardStates || {};
-            playerMadeAction = state.playerMadeAction || false;
-            
-            updateGameUI();
-        } else if (playerName && !state.gameStarted) {
-            players = state.players || [];
-            updateLobbyUI();
-        }
-    }, (error) => {
-        console.error('Firebase subscription error:', error);
-    });
-}
-
 // Инициализация
 async function init() {
-    console.log('Init started, Firebase ready:', firebaseReady);
+    console.log('Init started');
     
-    let saved = null;
+    // Проверяем localStorage сначала
+    const localState = loadFromLocalStorage();
     
-    // Пробуем загрузить из Firebase
     if (firebaseReady) {
         try {
-            saved = await loadGameStateFirebase();
+            // Пробуем загрузить состояние из Firebase
+            const firebaseState = await loadGameStateFirebase();
+            
+            if (firebaseState && !firebaseState.gameEnded) {
+                // В Firebase есть активная игра
+                restoreGameState(firebaseState);
+                
+                // Если у нас есть сохраненный playerId, используем его
+                if (localState && localState.playerId) {
+                    playerId = localState.playerId;
+                    playerName = localState.playerName;
+                    playerRole = localState.playerRole;
+                }
+                
+                if (gameStarted) {
+                    showGamePage();
+                } else {
+                    showLobbyPage();
+                    updateLobbyUI();
+                }
+            } else {
+                // Игры нет, начинаем новую
+                showLoginPage();
+            }
         } catch (error) {
-            console.log('Failed to load from Firebase, trying localStorage');
+            console.log('Firebase load failed, using localStorage');
+            restoreFromLocalOrLogin(localState);
         }
-    }
-    
-    // Если Firebase не сработал, пробуем localStorage
-    if (!saved) {
-        saved = loadFromLocalStorage();
-    }
-    
-    // Восстанавливаем состояние
-    if (saved && saved.gameStarted && !saved.gameEnded) {
-        restoreState(saved);
-        showGamePage();
-    } else if (saved && saved.playerName && !saved.gameStarted) {
-        restoreState(saved);
-        showLobbyPage();
-        updateLobbyUI();
     } else {
-        showLoginPage();
+        restoreFromLocalOrLogin(localState);
     }
     
-    // Подписываемся на обновления Firebase
+    // Подписываемся на обновления
     if (firebaseReady) {
         subscribeToGameUpdates();
     }
 }
 
-function restoreState(state) {
-    playerName = state.playerName || '';
-    playerRole = state.playerRole || '';
+function restoreFromLocalOrLogin(localState) {
+    if (localState && localState.playerName) {
+        restoreGameState(localState);
+        playerId = localState.playerId || generatePlayerId();
+        
+        if (gameStarted) {
+            showGamePage();
+        } else {
+            showLobbyPage();
+            updateLobbyUI();
+        }
+    } else {
+        showLoginPage();
+    }
+}
+
+function restoreGameState(state) {
     players = state.players || [];
     turnOrder = state.turnOrder || [];
     currentTurnIndex = state.currentTurnIndex || 0;
@@ -298,7 +355,10 @@ function restoreState(state) {
 
 function saveGameState() {
     if (firebaseReady) {
-        saveGameStateFirebase();
+        saveGameStateToFirebase();
+        if (playerId) {
+            savePlayerData();
+        }
     }
     saveToLocalStorage();
 }
@@ -343,32 +403,74 @@ function joinGame() {
         return;
     }
     
+    // Генерируем уникальный ID для этого игрока
+    playerId = generatePlayerId();
     playerName = name;
     
-    if (!players.includes(name)) {
-        players.push(name);
+    // Загружаем текущее состояние из Firebase
+    if (firebaseReady) {
+        loadGameStateFirebase().then(state => {
+            if (state && !state.gameEnded) {
+                // Присоединяемся к существующей игре
+                restoreGameState(state);
+                
+                // Добавляем игрока если его нет
+                if (!players.includes(name)) {
+                    players.push(name);
+                }
+            } else {
+                // Создаем новую игру
+                players = [name];
+                gameStarted = false;
+                cardsDealt = false;
+                firstCardDrawn = false;
+                deck = [];
+                discardPile = [];
+                tableCards = [];
+                playerHands = {};
+                cardStates = {};
+                turnOrder = [];
+                currentTurnIndex = 0;
+                playerMadeAction = false;
+            }
+            
+            saveGameState();
+            showLobbyPage();
+            showNotification(`Добро пожаловать, ${name}!`, 'success');
+        }).catch(error => {
+            // Fallback к localStorage
+            players = [name];
+            gameStarted = false;
+            saveGameState();
+            showLobbyPage();
+            showNotification(`Добро пожаловать, ${name}! (оффлайн режим)`, 'success');
+        });
+    } else {
+        // Оффлайн режим
+        const localState = loadFromLocalStorage();
+        if (localState && !localState.gameEnded) {
+            restoreGameState(localState);
+            if (!players.includes(name)) {
+                players.push(name);
+            }
+        } else {
+            players = [name];
+            gameStarted = false;
+        }
+        
+        saveGameState();
+        showLobbyPage();
+        showNotification(`Добро пожаловать, ${name}! (оффлайн режим)`, 'info');
     }
-    
-    if (players.length === 1) {
-        gameStarted = false;
-        cardsDealt = false;
-        firstCardDrawn = false;
-        deck = [];
-        discardPile = [];
-        tableCards = [];
-        playerHands = {};
-        cardStates = {};
-        turnOrder = [];
-        currentTurnIndex = 0;
-        playerMadeAction = false;
-    }
-    
-    saveGameState();
-    showLobbyPage();
-    showNotification(`Добро пожаловать, ${name}!`, 'success');
 }
 
 function leaveGame() {
+    if (firebaseReady && playerId) {
+        // Удаляем игрока из Firebase
+        database.ref(`rooms/${ROOM_ID}/players/${playerId}`).remove();
+    }
+    
+    // Удаляем игрока из списка
     players = players.filter(p => p !== playerName);
     
     if (players.length === 0 && firebaseReady) {
@@ -379,7 +481,9 @@ function leaveGame() {
     
     playerName = '';
     playerRole = '';
+    playerId = '';
     
+    localStorage.removeItem('detectiveGame');
     showLoginPage();
     showNotification('Вы покинули игру', 'info');
 }
@@ -397,7 +501,8 @@ function selectRole(role) {
         selectedRoleEl.textContent = `Выбрана роль: ${role === 'player' ? 'Игрок' : role === 'master' ? 'Мастер' : 'Мастер+Игрок'}`;
     }
     
-    saveGameState();
+    savePlayerData();
+    saveToLocalStorage();
 }
 
 function updateLobbyUI() {
@@ -1068,12 +1173,12 @@ function resetGame() {
     playerRole = '';
     players = [];
     playerMadeAction = false;
+    playerId = '';
     
     const state = { gameEnded: true };
     localStorage.setItem('detectiveGame', JSON.stringify(state));
     
     if (firebaseReady && database) {
-        database.ref(`rooms/${ROOM_ID}/gameState`).set(state);
         database.ref(`rooms/${ROOM_ID}`).remove();
     }
     
@@ -1168,11 +1273,11 @@ window.onload = function() {
     console.log('Page loaded, starting init...');
     init().catch(error => {
         console.error('Init error:', error);
-        // Если Firebase не работает, пробуем localStorage
-        const saved = loadFromLocalStorage();
-        if (saved && saved.playerName) {
-            restoreState(saved);
-            if (saved.gameStarted) {
+        const localState = loadFromLocalStorage();
+        if (localState && localState.playerName) {
+            restoreGameState(localState);
+            playerId = localState.playerId || generatePlayerId();
+            if (gameStarted) {
                 showGamePage();
             } else {
                 showLobbyPage();
