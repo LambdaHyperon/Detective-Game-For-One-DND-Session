@@ -128,7 +128,10 @@ function generatePlayerId() {
 }
 
 function saveGameToFirebase() {
-    if (!firebaseReady || !database) return;
+    if (!firebaseReady || !database) {
+        console.log('Firebase not ready, skipping save');
+        return;
+    }
     
     const gameData = {
         players,
@@ -148,7 +151,10 @@ function saveGameToFirebase() {
     };
     
     lastLocalUpdate = Date.now();
-    database.ref(`rooms/${ROOM_ID}/game`).set(gameData);
+    
+    database.ref(`rooms/${ROOM_ID}/game`).set(gameData)
+        .then(() => console.log('Game saved successfully'))
+        .catch(error => console.error('Error saving game:', error));
 }
 
 function saveMyPlayerToFirebase() {
@@ -277,30 +283,32 @@ async function joinGame() {
     myPlayerName = name;
     myPlayerRole = '';
     
+    console.log('Joining as:', name, 'ID:', myPlayerId);
+    
     if (firebaseReady) {
         try {
-            const playersSnapshot = await database.ref(`rooms/${ROOM_ID}/players`).once('value');
-            const playersData = playersSnapshot.val() || {};
-            
-            // Удаляем старые записи с таким же именем
-            for (const [pid, pdata] of Object.entries(playersData)) {
-                if (pdata.name === name && pid !== myPlayerId) {
-                    await database.ref(`rooms/${ROOM_ID}/players/${pid}`).remove();
-                }
-            }
-            
+            // Проверяем состояние игры
             const gameSnapshot = await database.ref(`rooms/${ROOM_ID}/game`).once('value');
-            let gameState = gameSnapshot.val();
+            const gameState = gameSnapshot.val();
+            
+            console.log('Game state:', gameState);
             
             // Если игра завершена - удаляем всё
             if (gameState && gameState.gameEnded) {
+                console.log('Game ended, removing room');
                 await database.ref(`rooms/${ROOM_ID}`).remove();
-                gameState = null;
             }
             
-            if (gameState && gameState.gameStarted) {
-                const existingPlayer = players.find(p => p.name === name);
+            // Если игра уже идет
+            if (gameState && gameState.gameStarted && !gameState.gameEnded) {
+                // Проверяем, есть ли уже такой игрок
+                const playersSnapshot = await database.ref(`rooms/${ROOM_ID}/players`).once('value');
+                const playersData = playersSnapshot.val() || {};
+                const existingPlayer = Object.values(playersData).find(p => p.name === name);
+                
                 if (existingPlayer) {
+                    console.log('Reconnecting as existing player:', existingPlayer);
+                    // Переподключаемся
                     myPlayerId = existingPlayer.id;
                     myPlayerName = existingPlayer.name;
                     myPlayerRole = existingPlayer.role || '';
@@ -310,6 +318,7 @@ async function joinGame() {
                     });
                     await database.ref(`rooms/${ROOM_ID}/players/${myPlayerId}`).onDisconnect().remove();
                     
+                    // Загружаем состояние
                     players = gameState.players || [];
                     turnOrder = gameState.turnOrder || [];
                     currentTurnIndex = gameState.currentTurnIndex || 0;
@@ -333,32 +342,86 @@ async function joinGame() {
                 }
             }
             
-            if (gameState && !gameState.gameEnded) {
-                players = gameState.players || [];
+            // Получаем текущий список игроков
+            const playersSnapshot = await database.ref(`rooms/${ROOM_ID}/players`).once('value');
+            const playersData = playersSnapshot.val() || {};
+            
+            // Проверяем, нет ли уже игрока с таким именем
+            const existingPlayer = Object.values(playersData).find(p => p.name === name);
+            if (existingPlayer) {
+                console.log('Player with this name already exists, reconnecting');
+                myPlayerId = existingPlayer.id;
+                myPlayerName = existingPlayer.name;
+                myPlayerRole = existingPlayer.role || '';
             } else {
-                players = [];
+                // Новый игрок
+                console.log('New player');
+                // Сохраняем игрока в Firebase
+                await database.ref(`rooms/${ROOM_ID}/players/${myPlayerId}`).set({
+                    id: myPlayerId,
+                    name: name,
+                    role: '',
+                    lastSeen: firebase.database.ServerValue.TIMESTAMP
+                });
+                await database.ref(`rooms/${ROOM_ID}/players/${myPlayerId}`).onDisconnect().remove();
             }
             
-            players.push({
-                id: myPlayerId,
-                name: name,
-                role: ''
-            });
+            // Загружаем или создаем игру
+            if (gameState && !gameState.gameEnded) {
+                console.log('Joining existing lobby');
+                players = gameState.players || [];
+                
+                // Обновляем или добавляем игрока в список
+                const existingIndex = players.findIndex(p => p.id === myPlayerId);
+                if (existingIndex >= 0) {
+                    players[existingIndex] = {
+                        id: myPlayerId,
+                        name: name,
+                        role: players[existingIndex].role || ''
+                    };
+                } else {
+                    players.push({
+                        id: myPlayerId,
+                        name: name,
+                        role: ''
+                    });
+                }
+                
+                // Восстанавливаем состояние
+                turnOrder = gameState.turnOrder || [];
+                currentTurnIndex = gameState.currentTurnIndex || 0;
+                gameStarted = gameState.gameStarted || false;
+                cardsDealt = gameState.cardsDealt || false;
+                firstCardDrawn = gameState.firstCardDrawn || false;
+                deck = gameState.deck || [];
+                discardPile = gameState.discardPile || [];
+                tableCards = gameState.tableCards || [];
+                playerHands = gameState.playerHands || {};
+                cardStates = gameState.cardStates || {};
+                playerMadeAction = gameState.playerMadeAction || false;
+            } else {
+                console.log('Creating new lobby');
+                // Создаем новую игру
+                players = [{
+                    id: myPlayerId,
+                    name: name,
+                    role: ''
+                }];
+                
+                gameStarted = false;
+                cardsDealt = false;
+                firstCardDrawn = false;
+                deck = [];
+                discardPile = [];
+                tableCards = [];
+                playerHands = {};
+                cardStates = {};
+                turnOrder = [];
+                currentTurnIndex = 0;
+                playerMadeAction = false;
+            }
             
-            await saveMyPlayerToFirebase();
-            
-            gameStarted = false;
-            cardsDealt = false;
-            firstCardDrawn = false;
-            deck = [];
-            discardPile = [];
-            tableCards = [];
-            playerHands = {};
-            cardStates = {};
-            turnOrder = [];
-            currentTurnIndex = 0;
-            playerMadeAction = false;
-            
+            // Сохраняем игру
             saveGameToFirebase();
             subscribeToGameUpdates();
             subscribeToPlayersList();
@@ -368,9 +431,12 @@ async function joinGame() {
             
         } catch (error) {
             console.error('Join error:', error);
-            showNotification('Ошибка подключения', 'error');
+            console.error('Error details:', error.message, error.stack);
+            showNotification('Ошибка подключения: ' + error.message, 'error');
         }
     } else {
+        // Оффлайн режим
+        console.log('Offline mode');
         myPlayerName = name;
         players = [{id: myPlayerId, name: name, role: ''}];
         gameStarted = false;
