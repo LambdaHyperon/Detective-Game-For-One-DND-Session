@@ -1,3 +1,21 @@
+// Firebase конфигурация
+const firebaseConfig = {
+    apiKey: "AIzaSyDoI8OK441KwmcoXNFVbswBbgNZvoELMto",
+    authDomain: "detective-game-for-dnd-session.firebaseapp.com",
+    databaseURL: "https://detective-game-for-dnd-session-default-rtdb.firebaseio.com",
+    projectId: "detective-game-for-dnd-session",
+    storageBucket: "detective-game-for-dnd-session.firebasestorage.app",
+    messagingSenderId: "371582003659",
+    appId: "1:371582003659:web:c9ab6512d3ff5fa3f6ee4e"
+};
+
+// Инициализация Firebase
+firebase.initializeApp(firebaseConfig);
+const database = firebase.database();
+
+// Уникальный ID комнаты
+const ROOM_ID = 'default-room';
+
 // Глобальные переменные
 let playerName = '';
 let playerRole = ''; // 'player', 'master', 'both'
@@ -8,6 +26,7 @@ let gameStarted = false;
 let cardsDealt = false;
 let firstCardDrawn = false;
 let playerMadeAction = false; // Отслеживает, сделал ли игрок действие в текущий ход
+let lastLocalUpdate = null;
 
 // Карты (всего 32 карты)
 let deck = [];
@@ -103,58 +122,36 @@ function showNotification(message, type = 'info') {
     }, 3000);
 }
 
-// Инициализация
-function init() {
-    // Загружаем данные из localStorage
-    const saved = loadGameState();
-    
-    // Проверяем, есть ли активная сессия и не завершена ли игра
-    if (saved && saved.gameStarted && !saved.gameEnded) {
-        playerName = saved.playerName;
-        playerRole = saved.playerRole;
-        showGamePage();
-    } else if (saved && saved.playerName && !saved.gameStarted) {
-        playerName = saved.playerName;
-        playerRole = saved.playerRole;
-        showLobbyPage();
-        updateLobbyUI();
-    } else {
-        // Если нет сохранений или игра завершена - показываем страницу входа
-        showLoginPage();
-    }
-}
-
+// Загрузка состояния игры из Firebase
 function loadGameState() {
-    const saved = localStorage.getItem('detectiveGame');
-    if (saved) {
-        const state = JSON.parse(saved);
-        // Проверяем, не завершена ли игра
-        if (state.gameEnded) {
-            localStorage.removeItem('detectiveGame');
-            return null;
-        }
-        
-        // Восстанавливаем глобальные переменные
-        playerName = state.playerName || '';
-        playerRole = state.playerRole || '';
-        players = state.players || [];
-        turnOrder = state.turnOrder || [];
-        currentTurnIndex = state.currentTurnIndex || 0;
-        gameStarted = state.gameStarted || false;
-        cardsDealt = state.cardsDealt || false;
-        firstCardDrawn = state.firstCardDrawn || false;
-        deck = state.deck || [];
-        discardPile = state.discardPile || [];
-        tableCards = state.tableCards || [];
-        playerHands = state.playerHands || {};
-        cardStates = state.cardStates || {};
-        playerMadeAction = state.playerMadeAction || false;
-        
-        return state;
-    }
-    return null;
+    return new Promise((resolve) => {
+        database.ref(`rooms/${ROOM_ID}/gameState`).once('value', (snapshot) => {
+            const state = snapshot.val();
+            if (state && !state.gameEnded) {
+                // Восстанавливаем глобальные переменные
+                playerName = state.playerName || '';
+                playerRole = state.playerRole || '';
+                players = state.players || [];
+                turnOrder = state.turnOrder || [];
+                currentTurnIndex = state.currentTurnIndex || 0;
+                gameStarted = state.gameStarted || false;
+                cardsDealt = state.cardsDealt || false;
+                firstCardDrawn = state.firstCardDrawn || false;
+                deck = state.deck || [];
+                discardPile = state.discardPile || [];
+                tableCards = state.tableCards || [];
+                playerHands = state.playerHands || {};
+                cardStates = state.cardStates || {};
+                playerMadeAction = state.playerMadeAction || false;
+                resolve(state);
+            } else {
+                resolve(null);
+            }
+        });
+    });
 }
 
+// Сохранение состояния игры в Firebase
 function saveGameState() {
     const state = {
         playerName,
@@ -171,9 +168,73 @@ function saveGameState() {
         playerHands,
         cardStates,
         playerMadeAction,
-        gameEnded: false
+        gameEnded: false,
+        lastUpdated: firebase.database.ServerValue.TIMESTAMP
     };
-    localStorage.setItem('detectiveGame', JSON.stringify(state));
+    database.ref(`rooms/${ROOM_ID}/gameState`).set(state);
+}
+
+// Сохранение с отметкой времени
+function saveGameStateFirebase() {
+    lastLocalUpdate = Date.now();
+    saveGameState();
+}
+
+// Подписка на обновления для синхронизации между игроками
+function subscribeToGameUpdates() {
+    database.ref(`rooms/${ROOM_ID}/gameState`).on('value', (snapshot) => {
+        const state = snapshot.val();
+        if (!state || state.gameEnded) return;
+        
+        // Не обновляем, если это наши собственные изменения
+        if (state.lastUpdated && lastLocalUpdate && 
+            state.lastUpdated <= lastLocalUpdate) return;
+        
+        // Обновляем UI только если мы не на странице входа
+        if (playerName && state.gameStarted) {
+            // Восстанавливаем состояние
+            players = state.players || [];
+            turnOrder = state.turnOrder || [];
+            currentTurnIndex = state.currentTurnIndex || 0;
+            gameStarted = state.gameStarted;
+            cardsDealt = state.cardsDealt || false;
+            firstCardDrawn = state.firstCardDrawn || false;
+            deck = state.deck || [];
+            discardPile = state.discardPile || [];
+            tableCards = state.tableCards || [];
+            playerHands = state.playerHands || {};
+            cardStates = state.cardStates || {};
+            playerMadeAction = state.playerMadeAction || false;
+            
+            updateGameUI();
+        } else if (playerName && !state.gameStarted) {
+            players = state.players || [];
+            updateLobbyUI();
+        }
+    });
+}
+
+// Инициализация
+async function init() {
+    // Загружаем данные из Firebase
+    const saved = await loadGameState();
+    
+    // Проверяем, есть ли активная сессия
+    if (saved && saved.gameStarted && !saved.gameEnded) {
+        playerName = saved.playerName;
+        playerRole = saved.playerRole;
+        showGamePage();
+    } else if (saved && saved.playerName && !saved.gameStarted) {
+        playerName = saved.playerName;
+        playerRole = saved.playerRole;
+        showLobbyPage();
+        updateLobbyUI();
+    } else {
+        showLoginPage();
+    }
+    
+    // Подписываемся на обновления в реальном времени
+    subscribeToGameUpdates();
 }
 
 // Навигация по страницам
@@ -214,21 +275,42 @@ function joinGame() {
         players.push(name);
     }
     
-    // Сбрасываем состояние игры при новом входе
-    gameStarted = false;
-    cardsDealt = false;
-    firstCardDrawn = false;
-    deck = [];
-    discardPile = [];
-    tableCards = [];
-    playerHands = {};
-    cardStates = {};
-    turnOrder = [];
-    currentTurnIndex = 0;
-    playerMadeAction = false;
+    // Если это первый игрок, сбрасываем состояние
+    if (players.length === 1) {
+        gameStarted = false;
+        cardsDealt = false;
+        firstCardDrawn = false;
+        deck = [];
+        discardPile = [];
+        tableCards = [];
+        playerHands = {};
+        cardStates = {};
+        turnOrder = [];
+        currentTurnIndex = 0;
+        playerMadeAction = false;
+    }
     
-    saveGameState();
+    saveGameStateFirebase();
     showLobbyPage();
+}
+
+// Выход из игры
+function leaveGame() {
+    // Удаляем игрока из списка
+    players = players.filter(p => p !== playerName);
+    
+    // Если игроков не осталось, удаляем комнату
+    if (players.length === 0) {
+        database.ref(`rooms/${ROOM_ID}`).remove();
+    } else {
+        saveGameStateFirebase();
+    }
+    
+    // Сбрасываем локальные данные
+    playerName = '';
+    playerRole = '';
+    
+    showLoginPage();
 }
 
 // Страница лобби
@@ -241,7 +323,7 @@ function selectRole(role) {
     
     document.getElementById('selectedRole').textContent = `Выбрана роль: ${role === 'player' ? 'Игрок' : role === 'master' ? 'Мастер' : 'Мастер+Игрок'}`;
     
-    saveGameState();
+    saveGameStateFirebase();
 }
 
 function updateLobbyUI() {
@@ -259,7 +341,7 @@ function updateLobbyUI() {
 function updatePlayersList() {
     const listDiv = document.getElementById('playersList');
     listDiv.innerHTML = '<h3>Игроки в лобби:</h3>' + 
-        players.map(p => `<div>• ${p}</div>`).join('');
+        players.map(p => `<div>• ${p}${p === playerName ? ' (Вы)' : ''}</div>`).join('');
 }
 
 function shuffleTurnOrder() {
@@ -275,7 +357,7 @@ function shuffleTurnOrder() {
         turnOrder.map((p, i) => `<div>${i + 1}. ${p}</div>`).join('');
     
     showNotification('Порядок ходов перемешан!', 'success');
-    saveGameState();
+    saveGameStateFirebase();
 }
 
 function startGame() {
@@ -297,7 +379,7 @@ function startGame() {
         currentTurnIndex = 0;
         playerMadeAction = false;
         
-        saveGameState();
+        saveGameStateFirebase();
         showGamePage();
     });
 }
@@ -523,7 +605,7 @@ function shuffleDeck() {
         setTimeout(() => deckElement.classList.remove('shuffle-animation'), 1000);
     }
     
-    saveGameState();
+    saveGameStateFirebase();
     updateDeckDisplay();
     showNotification('Колода перемешана!', 'success');
 }
@@ -558,7 +640,7 @@ function dealCards() {
     });
     
     cardsDealt = true;
-    saveGameState();
+    saveGameStateFirebase();
     updateGameUI();
     showNotification('Карты розданы!', 'success');
 }
@@ -573,7 +655,7 @@ function drawFirstCard() {
     firstCardDrawn = true;
     placeFirstCard();
     
-    saveGameState();
+    saveGameStateFirebase();
     updateGameUI();
     showNotification('Первая карта выложена на стол', 'success');
 }
@@ -589,7 +671,7 @@ function masterDrawCard() {
     tableCards.push(card);
     cardStates[card].onTable = true;
     
-    saveGameState();
+    saveGameStateFirebase();
     updateGameUI();
 }
 
@@ -661,7 +743,7 @@ function playCard(cardId) {
         cardStates[cardId].owner = null;
         
         playerMadeAction = true;
-        saveGameState();
+        saveGameStateFirebase();
         updateGameUI();
         showNotification('Карта выложена на стол', 'success');
     });
@@ -685,7 +767,7 @@ function discardCard(cardId) {
         cardStates[cardId].owner = null;
         
         playerMadeAction = true;
-        saveGameState();
+        saveGameStateFirebase();
         updateGameUI();
         showNotification('Карта сброшена', 'info');
     });
@@ -718,7 +800,7 @@ function endTurn() {
     currentTurnIndex = (currentTurnIndex + 1) % turnOrder.length;
     playerMadeAction = false; // Сбрасываем для следующего игрока
     
-    saveGameState();
+    saveGameStateFirebase();
     updateGameUI();
     showNotification(`Ход переходит к ${turnOrder[currentTurnIndex]}`, 'info');
 }
@@ -915,10 +997,10 @@ function resetGame() {
     players = [];
     playerMadeAction = false;
     
-    // Помечаем игру как завершенную и очищаем localStorage
+    // Помечаем игру как завершенную и очищаем Firebase
     const state = { gameEnded: true };
-    localStorage.setItem('detectiveGame', JSON.stringify(state));
-    localStorage.removeItem('detectiveGame');
+    database.ref(`rooms/${ROOM_ID}/gameState`).set(state);
+    database.ref(`rooms/${ROOM_ID}`).remove();
     
     // Показываем страницу входа
     showLoginPage();
