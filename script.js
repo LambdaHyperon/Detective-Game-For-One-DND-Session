@@ -9,7 +9,7 @@ const firebaseConfig = {
     appId: "1:371582003659:web:c9ab6512d3ff5fa3f6ee4e"
 };
 
-// Инициализация Firebase с проверкой
+// Инициализация Firebase
 let database;
 let firebaseReady = false;
 
@@ -23,30 +23,30 @@ try {
     firebaseReady = false;
 }
 
-// Уникальный ID комнаты
 const ROOM_ID = 'default-room';
 
-// Глобальные переменные ДЛЯ КОНКРЕТНОГО ИГРОКА
-let playerName = '';
-let playerRole = '';
-let playerId = ''; // Уникальный ID игрока
-let players = [];
-let turnOrder = [];
+// ===== ДАННЫЕ КОНКРЕТНОГО ИГРОКА (не сохраняются в Firebase) =====
+let myPlayerId = '';
+let myPlayerName = '';
+let myPlayerRole = '';
+
+// ===== ОБЩИЕ ДАННЫЕ ИГРЫ (синхронизируются через Firebase) =====
+let players = [];         // [{id, name, role}]
+let turnOrder = [];       // [playerId]
 let currentTurnIndex = 0;
 let gameStarted = false;
 let cardsDealt = false;
 let firstCardDrawn = false;
 let playerMadeAction = false;
-let lastLocalUpdate = null;
-
-// Карты
 let deck = [];
 let discardPile = [];
 let tableCards = [];
-let playerHands = {}; // {playerId: [cardIds]}
+let playerHands = {};     // {playerId: [cardIds]}
 let cardStates = {};
+
 const TRAP_CARDS = Array.from({length: 13}, (_, i) => i + 20);
 const FIRST_CARD = 1;
+let lastLocalUpdate = null;
 
 // Тест
 const testQuestions = [
@@ -102,18 +102,13 @@ const testQuestions = [
     }
 ];
 
-// Система уведомлений
+// ===== УВЕДОМЛЕНИЯ =====
 let notificationTimeout = null;
 
 function showNotification(message, type = 'info') {
     const oldNotification = document.querySelector('.game-notification');
-    if (oldNotification) {
-        oldNotification.remove();
-    }
-    
-    if (notificationTimeout) {
-        clearTimeout(notificationTimeout);
-    }
+    if (oldNotification) oldNotification.remove();
+    if (notificationTimeout) clearTimeout(notificationTimeout);
     
     const notification = document.createElement('div');
     notification.className = `game-notification ${type}`;
@@ -121,43 +116,21 @@ function showNotification(message, type = 'info') {
     document.body.appendChild(notification);
     
     setTimeout(() => notification.classList.add('show'), 10);
-    
     notificationTimeout = setTimeout(() => {
         notification.classList.remove('show');
         setTimeout(() => notification.remove(), 300);
     }, 3000);
 }
 
-// Генерация уникального ID
+// ===== FIREBASE ФУНКЦИИ =====
 function generatePlayerId() {
-    return 'player_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now();
+    return 'p_' + Math.random().toString(36).substr(2, 9);
 }
 
-// Загрузка состояния ИГРЫ из Firebase (общие данные)
-function loadGameStateFirebase() {
-    return new Promise((resolve, reject) => {
-        if (!firebaseReady || !database) {
-            reject(new Error('Firebase not ready'));
-            return;
-        }
-        
-        database.ref(`rooms/${ROOM_ID}/gameState`).once('value')
-            .then((snapshot) => {
-                const state = snapshot.val();
-                resolve(state);
-            })
-            .catch((error) => {
-                console.error('Firebase load error:', error);
-                reject(error);
-            });
-    });
-}
-
-// Сохранение состояния ИГРЫ в Firebase (общие данные)
-function saveGameStateToFirebase() {
+function saveGameToFirebase() {
     if (!firebaseReady || !database) return;
     
-    const state = {
+    const gameData = {
         players,
         turnOrder,
         currentTurnIndex,
@@ -175,43 +148,58 @@ function saveGameStateToFirebase() {
     };
     
     lastLocalUpdate = Date.now();
-    database.ref(`rooms/${ROOM_ID}/gameState`).set(state)
-        .catch(error => console.error('Firebase save error:', error));
+    database.ref(`rooms/${ROOM_ID}/game`).set(gameData);
 }
 
-// Сохранение данных КОНКРЕТНОГО ИГРОКА
-function savePlayerData() {
-    if (!firebaseReady || !database || !playerId) return;
+function saveMyPlayerToFirebase() {
+    if (!firebaseReady || !database || !myPlayerId) return;
     
     const playerData = {
-        name: playerName,
-        role: playerRole,
+        id: myPlayerId,
+        name: myPlayerName,
+        role: myPlayerRole,
         lastSeen: firebase.database.ServerValue.TIMESTAMP
     };
     
-    database.ref(`rooms/${ROOM_ID}/players/${playerId}`).set(playerData)
-        .catch(error => console.error('Firebase player save error:', error));
-    
-    // Удаляем данные игрока при отключении
-    database.ref(`rooms/${ROOM_ID}/players/${playerId}`).onDisconnect().remove();
+    database.ref(`rooms/${ROOM_ID}/players/${myPlayerId}`).set(playerData);
+    database.ref(`rooms/${ROOM_ID}/players/${myPlayerId}`).onDisconnect().remove();
 }
 
-// Подписка на обновления игры
+// ===== ПОДПИСКИ НА ОБНОВЛЕНИЯ =====
+function subscribeToPlayersList() {
+    if (!firebaseReady || !database) return;
+    
+    database.ref(`rooms/${ROOM_ID}/players`).on('value', (snapshot) => {
+        const playersData = snapshot.val() || {};
+        const firebasePlayers = Object.values(playersData);
+        
+        players = firebasePlayers.map(p => ({
+            id: p.id,
+            name: p.name,
+            role: p.role || ''
+        }));
+        
+        console.log('Players updated:', players);
+        
+        if (!gameStarted) {
+            updateLobbyUI();
+        }
+    });
+}
+
 function subscribeToGameUpdates() {
     if (!firebaseReady || !database) return;
     
-    database.ref(`rooms/${ROOM_ID}/gameState`).on('value', (snapshot) => {
+    database.ref(`rooms/${ROOM_ID}/game`).on('value', (snapshot) => {
         const state = snapshot.val();
         if (!state || state.gameEnded) return;
         
-        if (state.lastUpdated && lastLocalUpdate && 
-            state.lastUpdated <= lastLocalUpdate) return;
+        if (state.lastUpdated && lastLocalUpdate && state.lastUpdated <= lastLocalUpdate) return;
         
-        // Обновляем общие данные
         players = state.players || [];
         turnOrder = state.turnOrder || [];
         currentTurnIndex = state.currentTurnIndex || 0;
-        gameStarted = state.gameStarted;
+        gameStarted = state.gameStarted || false;
         cardsDealt = state.cardsDealt || false;
         firstCardDrawn = state.firstCardDrawn || false;
         deck = state.deck || [];
@@ -224,152 +212,38 @@ function subscribeToGameUpdates() {
         if (gameStarted) {
             updateGameUI();
         }
-    }, (error) => {
-        console.error('Firebase subscription error:', error);
-    });
-    
-    // Подписка на список игроков
-    database.ref(`rooms/${ROOM_ID}/players`).on('value', (snapshot) => {
-        const playersData = snapshot.val() || {};
-        const currentPlayers = Object.values(playersData).map(p => p.name);
-        
-        // Обновляем список игроков если мы в лобби
-        if (!gameStarted) {
-            players = currentPlayers;
-            updateLobbyUI();
-        }
     });
 }
 
-// Сохранение в localStorage (для оффлайн режима)
-function saveToLocalStorage() {
-    const state = {
-        playerId,
-        playerName,
-        playerRole,
-        players,
-        turnOrder,
-        currentTurnIndex,
-        gameStarted,
-        cardsDealt,
-        firstCardDrawn,
-        deck,
-        discardPile,
-        tableCards,
-        playerHands,
-        cardStates,
-        playerMadeAction,
-        gameEnded: false
-    };
-    localStorage.setItem('detectiveGame', JSON.stringify(state));
-}
-
-function loadFromLocalStorage() {
-    const saved = localStorage.getItem('detectiveGame');
-    if (saved) {
-        const state = JSON.parse(saved);
-        if (!state.gameEnded) {
-            return state;
-        }
-    }
-    return null;
-}
-
-// Инициализация
+// ===== ИНИЦИАЛИЗАЦИЯ =====
 async function init() {
     console.log('Init started');
     
-    // Проверяем localStorage сначала
-    const localState = loadFromLocalStorage();
+    showLoginPage();
     
     if (firebaseReady) {
+        subscribeToPlayersList();
+        
         try {
-            // Пробуем загрузить состояние из Firebase
-            const firebaseState = await loadGameStateFirebase();
+            const gameSnapshot = await database.ref(`rooms/${ROOM_ID}/game`).once('value');
+            const gameState = gameSnapshot.val();
             
-            if (firebaseState && !firebaseState.gameEnded) {
-                // В Firebase есть активная игра
-                restoreGameState(firebaseState);
-                
-                // Если у нас есть сохраненный playerId, используем его
-                if (localState && localState.playerId) {
-                    playerId = localState.playerId;
-                    playerName = localState.playerName;
-                    playerRole = localState.playerRole;
-                }
-                
-                if (gameStarted) {
-                    showGamePage();
-                } else {
-                    showLobbyPage();
-                    updateLobbyUI();
-                }
-            } else {
-                // Игры нет, начинаем новую
-                showLoginPage();
+            if (gameState && gameState.gameEnded) {
+                await database.ref(`rooms/${ROOM_ID}`).remove();
+            } else if (gameState && gameState.gameStarted) {
+                subscribeToGameUpdates();
             }
         } catch (error) {
-            console.log('Firebase load failed, using localStorage');
-            restoreFromLocalOrLogin(localState);
-        }
-    } else {
-        restoreFromLocalOrLogin(localState);
-    }
-    
-    // Подписываемся на обновления
-    if (firebaseReady) {
-        subscribeToGameUpdates();
-    }
-}
-
-function restoreFromLocalOrLogin(localState) {
-    if (localState && localState.playerName) {
-        restoreGameState(localState);
-        playerId = localState.playerId || generatePlayerId();
-        
-        if (gameStarted) {
-            showGamePage();
-        } else {
-            showLobbyPage();
-            updateLobbyUI();
-        }
-    } else {
-        showLoginPage();
-    }
-}
-
-function restoreGameState(state) {
-    players = state.players || [];
-    turnOrder = state.turnOrder || [];
-    currentTurnIndex = state.currentTurnIndex || 0;
-    gameStarted = state.gameStarted || false;
-    cardsDealt = state.cardsDealt || false;
-    firstCardDrawn = state.firstCardDrawn || false;
-    deck = state.deck || [];
-    discardPile = state.discardPile || [];
-    tableCards = state.tableCards || [];
-    playerHands = state.playerHands || {};
-    cardStates = state.cardStates || {};
-    playerMadeAction = state.playerMadeAction || false;
-}
-
-function saveGameState() {
-    if (firebaseReady) {
-        saveGameStateToFirebase();
-        if (playerId) {
-            savePlayerData();
+            console.log('No active game');
         }
     }
-    saveToLocalStorage();
 }
 
-// Навигация
+// ===== НАВИГАЦИЯ =====
 function showPage(pageId) {
     document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
     const page = document.getElementById(pageId);
-    if (page) {
-        page.classList.add('active');
-    }
+    if (page) page.classList.add('active');
 }
 
 function showLoginPage() {
@@ -388,109 +262,155 @@ function showGamePage() {
     updateGameUI();
 }
 
-// Страница входа
-function joinGame() {
+// ===== ВХОД В ИГРУ =====
+async function joinGame() {
     const nameInput = document.getElementById('playerName');
-    if (!nameInput) {
-        console.error('Input not found');
-        return;
-    }
+    if (!nameInput) return;
     
     const name = nameInput.value.trim();
-    
     if (!name) {
         showNotification('Пожалуйста, введите имя', 'error');
         return;
     }
     
-    // Генерируем уникальный ID для этого игрока
-    playerId = generatePlayerId();
-    playerName = name;
+    myPlayerId = generatePlayerId();
+    myPlayerName = name;
+    myPlayerRole = '';
     
-    // Загружаем текущее состояние из Firebase
     if (firebaseReady) {
-        loadGameStateFirebase().then(state => {
-            if (state && !state.gameEnded) {
-                // Присоединяемся к существующей игре
-                restoreGameState(state);
-                
-                // Добавляем игрока если его нет
-                if (!players.includes(name)) {
-                    players.push(name);
+        try {
+            const playersSnapshot = await database.ref(`rooms/${ROOM_ID}/players`).once('value');
+            const playersData = playersSnapshot.val() || {};
+            
+            // Удаляем старые записи с таким же именем
+            for (const [pid, pdata] of Object.entries(playersData)) {
+                if (pdata.name === name && pid !== myPlayerId) {
+                    await database.ref(`rooms/${ROOM_ID}/players/${pid}`).remove();
                 }
-            } else {
-                // Создаем новую игру
-                players = [name];
-                gameStarted = false;
-                cardsDealt = false;
-                firstCardDrawn = false;
-                deck = [];
-                discardPile = [];
-                tableCards = [];
-                playerHands = {};
-                cardStates = {};
-                turnOrder = [];
-                currentTurnIndex = 0;
-                playerMadeAction = false;
             }
             
-            saveGameState();
+            const gameSnapshot = await database.ref(`rooms/${ROOM_ID}/game`).once('value');
+            let gameState = gameSnapshot.val();
+            
+            // Если игра завершена - удаляем всё
+            if (gameState && gameState.gameEnded) {
+                await database.ref(`rooms/${ROOM_ID}`).remove();
+                gameState = null;
+            }
+            
+            if (gameState && gameState.gameStarted) {
+                const existingPlayer = players.find(p => p.name === name);
+                if (existingPlayer) {
+                    myPlayerId = existingPlayer.id;
+                    myPlayerName = existingPlayer.name;
+                    myPlayerRole = existingPlayer.role || '';
+                    
+                    await database.ref(`rooms/${ROOM_ID}/players/${myPlayerId}`).update({
+                        lastSeen: firebase.database.ServerValue.TIMESTAMP
+                    });
+                    await database.ref(`rooms/${ROOM_ID}/players/${myPlayerId}`).onDisconnect().remove();
+                    
+                    players = gameState.players || [];
+                    turnOrder = gameState.turnOrder || [];
+                    currentTurnIndex = gameState.currentTurnIndex || 0;
+                    gameStarted = true;
+                    cardsDealt = gameState.cardsDealt || false;
+                    firstCardDrawn = gameState.firstCardDrawn || false;
+                    deck = gameState.deck || [];
+                    discardPile = gameState.discardPile || [];
+                    tableCards = gameState.tableCards || [];
+                    playerHands = gameState.playerHands || {};
+                    cardStates = gameState.cardStates || {};
+                    playerMadeAction = gameState.playerMadeAction || false;
+                    
+                    subscribeToGameUpdates();
+                    showGamePage();
+                    showNotification(`С возвращением, ${name}!`, 'success');
+                    return;
+                } else {
+                    showNotification('Игра уже началась, вы не можете присоединиться', 'error');
+                    return;
+                }
+            }
+            
+            if (gameState && !gameState.gameEnded) {
+                players = gameState.players || [];
+            } else {
+                players = [];
+            }
+            
+            players.push({
+                id: myPlayerId,
+                name: name,
+                role: ''
+            });
+            
+            await saveMyPlayerToFirebase();
+            
+            gameStarted = false;
+            cardsDealt = false;
+            firstCardDrawn = false;
+            deck = [];
+            discardPile = [];
+            tableCards = [];
+            playerHands = {};
+            cardStates = {};
+            turnOrder = [];
+            currentTurnIndex = 0;
+            playerMadeAction = false;
+            
+            saveGameToFirebase();
+            subscribeToGameUpdates();
+            subscribeToPlayersList();
+            
             showLobbyPage();
             showNotification(`Добро пожаловать, ${name}!`, 'success');
-        }).catch(error => {
-            // Fallback к localStorage
-            players = [name];
-            gameStarted = false;
-            saveGameState();
-            showLobbyPage();
-            showNotification(`Добро пожаловать, ${name}! (оффлайн режим)`, 'success');
-        });
-    } else {
-        // Оффлайн режим
-        const localState = loadFromLocalStorage();
-        if (localState && !localState.gameEnded) {
-            restoreGameState(localState);
-            if (!players.includes(name)) {
-                players.push(name);
-            }
-        } else {
-            players = [name];
-            gameStarted = false;
+            
+        } catch (error) {
+            console.error('Join error:', error);
+            showNotification('Ошибка подключения', 'error');
         }
-        
-        saveGameState();
+    } else {
+        myPlayerName = name;
+        players = [{id: myPlayerId, name: name, role: ''}];
+        gameStarted = false;
         showLobbyPage();
-        showNotification(`Добро пожаловать, ${name}! (оффлайн режим)`, 'info');
+        showNotification(`Добро пожаловать, ${name}! (оффлайн)`, 'info');
     }
 }
 
+// ===== ВЫХОД ИЗ ИГРЫ =====
 function leaveGame() {
-    if (firebaseReady && playerId) {
-        // Удаляем игрока из Firebase
-        database.ref(`rooms/${ROOM_ID}/players/${playerId}`).remove();
+    if (firebaseReady && myPlayerId) {
+        database.ref(`rooms/${ROOM_ID}/players/${myPlayerId}`).remove();
+        
+        players = players.filter(p => p.id !== myPlayerId);
+        if (players.length === 0) {
+            database.ref(`rooms/${ROOM_ID}`).remove();
+        } else {
+            saveGameToFirebase();
+        }
     }
     
-    // Удаляем игрока из списка
-    players = players.filter(p => p !== playerName);
+    myPlayerId = '';
+    myPlayerName = '';
+    myPlayerRole = '';
+    players = [];
     
-    if (players.length === 0 && firebaseReady) {
-        database.ref(`rooms/${ROOM_ID}`).remove();
-    } else {
-        saveGameState();
-    }
-    
-    playerName = '';
-    playerRole = '';
-    playerId = '';
-    
-    localStorage.removeItem('detectiveGame');
     showLoginPage();
     showNotification('Вы покинули игру', 'info');
 }
 
-// Страница лобби
+// ===== ЛОББИ =====
 function selectRole(role) {
-    playerRole = role;
+    myPlayerRole = role;
+    
+    players = players.map(p => {
+        if (p.id === myPlayerId) {
+            return {...p, role: role};
+        }
+        return p;
+    });
     
     document.querySelectorAll('.role-btn').forEach(btn => btn.classList.remove('selected'));
     const roleBtn = document.getElementById(role + 'Role');
@@ -501,21 +421,20 @@ function selectRole(role) {
         selectedRoleEl.textContent = `Выбрана роль: ${role === 'player' ? 'Игрок' : role === 'master' ? 'Мастер' : 'Мастер+Игрок'}`;
     }
     
-    savePlayerData();
-    saveToLocalStorage();
+    saveGameToFirebase();
+    saveMyPlayerToFirebase();
 }
 
 function updateLobbyUI() {
     const nameDisplay = document.getElementById('playerNameDisplay');
-    if (nameDisplay) nameDisplay.textContent = `Игрок: ${playerName}`;
+    if (nameDisplay) nameDisplay.textContent = `Игрок: ${myPlayerName}`;
     
-    if (playerRole) {
+    if (myPlayerRole) {
         const selectedRoleEl = document.getElementById('selectedRole');
         if (selectedRoleEl) {
-            selectedRoleEl.textContent = 
-                `Выбрана роль: ${playerRole === 'player' ? 'Игрок' : playerRole === 'master' ? 'Мастер' : 'Мастер+Игрок'}`;
+            selectedRoleEl.textContent = `Выбрана роль: ${myPlayerRole === 'player' ? 'Игрок' : myPlayerRole === 'master' ? 'Мастер' : 'Мастер+Игрок'}`;
         }
-        const roleBtn = document.getElementById(playerRole + 'Role');
+        const roleBtn = document.getElementById(myPlayerRole + 'Role');
         if (roleBtn) roleBtn.classList.add('selected');
     }
     
@@ -525,31 +444,39 @@ function updateLobbyUI() {
 function updatePlayersList() {
     const listDiv = document.getElementById('playersList');
     if (listDiv) {
-        listDiv.innerHTML = '<h3>Игроки в лобби:</h3>' + 
-            players.map(p => `<div>• ${p}${p === playerName ? ' (Вы)' : ''}</div>`).join('');
+        listDiv.innerHTML = '<h3>Игроки в лобби (' + players.length + '):</h3>' + 
+            players.map(p => {
+                const roleText = p.role === 'player' ? 'Игрок' : p.role === 'master' ? 'Мастер' : p.role === 'both' ? 'Мастер+Игрок' : 'Не выбрана';
+                return `<div>• ${p.name}${p.id === myPlayerId ? ' (Вы)' : ''} - ${roleText}</div>`;
+            }).join('');
     }
 }
 
 function shuffleTurnOrder() {
-    if (players.length < 2) {
-        showNotification('Недостаточно игроков для перемешивания', 'error');
+    const gamePlayers = players.filter(p => p.role !== 'master');
+    
+    if (gamePlayers.length < 2) {
+        showNotification('Недостаточно игроков для перемешивания (минимум 2 не-мастера)', 'error');
         return;
     }
     
-    turnOrder = [...players].sort(() => Math.random() - 0.5);
+    turnOrder = [...gamePlayers].sort(() => Math.random() - 0.5).map(p => p.id);
     
     const orderDiv = document.getElementById('turnOrder');
     if (orderDiv) {
         orderDiv.innerHTML = '<h3>Порядок ходов:</h3>' + 
-            turnOrder.map((p, i) => `<div>${i + 1}. ${p}</div>`).join('');
+            turnOrder.map((pid, i) => {
+                const player = players.find(p => p.id === pid);
+                return `<div>${i + 1}. ${player ? player.name : 'Неизвестный'}</div>`;
+            }).join('');
     }
     
     showNotification('Порядок ходов перемешан!', 'success');
-    saveGameState();
+    saveGameToFirebase();
 }
 
 function startGame() {
-    if (!playerRole) {
+    if (!myPlayerRole) {
         showNotification('Пожалуйста, выберите роль', 'error');
         return;
     }
@@ -558,14 +485,23 @@ function startGame() {
         gameStarted = true;
         initializeDeck();
         
+        const gamePlayers = players.filter(p => p.role !== 'master');
         if (turnOrder.length === 0) {
-            turnOrder = [...players];
+            turnOrder = gamePlayers.map(p => p.id);
+        } else {
+            turnOrder = turnOrder.filter(pid => {
+                const player = players.find(p => p.id === pid);
+                return player && player.role !== 'master';
+            });
+            if (turnOrder.length === 0) {
+                turnOrder = gamePlayers.map(p => p.id);
+            }
         }
         
         currentTurnIndex = 0;
         playerMadeAction = false;
         
-        saveGameState();
+        saveGameToFirebase();
         showGamePage();
     });
 }
@@ -581,7 +517,7 @@ function initializeDeck() {
     
     playerHands = {};
     players.forEach(p => {
-        playerHands[p] = [];
+        playerHands[p.id] = [];
     });
     
     discardPile = [];
@@ -599,10 +535,10 @@ function placeFirstCard() {
     firstCardDrawn = true;
 }
 
-// Игровая страница
+// ===== ИГРОВОЙ UI =====
 function updateGameUI() {
-    const isMasterRole = isMaster();
-    const isPlayerRole = isPlayer();
+    const isMasterRole = myPlayerRole === 'master' || myPlayerRole === 'both';
+    const isPlayerRole = myPlayerRole === 'player' || myPlayerRole === 'both';
     
     const masterControls = document.getElementById('masterDeckControls');
     const masterView = document.getElementById('masterViewArea');
@@ -612,12 +548,23 @@ function updateGameUI() {
     if (masterControls) masterControls.style.display = isMasterRole ? 'flex' : 'none';
     if (masterView) masterView.style.display = isMasterRole ? 'block' : 'none';
     if (endGameBtn) endGameBtn.style.display = isMasterRole ? 'inline-block' : 'none';
-    if (playerHand) playerHand.style.display = isPlayerRole ? 'block' : 'none';
+    
+    if (playerHand) {
+        if (myPlayerRole === 'player' || myPlayerRole === 'both') {
+            playerHand.style.display = 'block';
+        } else {
+            playerHand.style.display = 'none';
+        }
+    }
     
     updateTurnIndicator();
     updateDeckDisplay();
     updateTableDisplay();
-    updateHandDisplay();
+    
+    if (myPlayerRole === 'player' || myPlayerRole === 'both') {
+        updateHandDisplay();
+    }
+    
     updateDiscardDisplay();
     updateMasterButtons();
 }
@@ -656,10 +603,11 @@ function updateTurnIndicator() {
     if (!indicator) return;
     
     if (turnOrder.length > 0 && currentTurnIndex < turnOrder.length) {
-        const currentPlayer = turnOrder[currentTurnIndex];
-        indicator.textContent = `Ходит: ${currentPlayer} ${currentPlayer === playerName ? '(Вы)' : ''}`;
-    } else if (turnOrder.length > 0) {
-        indicator.textContent = 'Ожидание игроков...';
+        const currentPlayerId = turnOrder[currentTurnIndex];
+        const currentPlayer = players.find(p => p.id === currentPlayerId);
+        if (currentPlayer) {
+            indicator.textContent = `Ходит: ${currentPlayer.name} ${currentPlayerId === myPlayerId ? '(Вы)' : ''}`;
+        }
     }
 }
 
@@ -690,10 +638,7 @@ function updateTableDisplay() {
 }
 
 function updateHandDisplay() {
-    const isPlayerRole = playerRole === 'player' || playerRole === 'both';
-    if (!isPlayerRole) return;
-    
-    const hand = playerHands[playerName] || [];
+    const hand = playerHands[myPlayerId] || [];
     const container = document.getElementById('handCardsContainer');
     const handCount = document.getElementById('handCount');
     
@@ -744,16 +689,12 @@ function updateDiscardDisplay() {
     const discardCountElement = document.getElementById('discardCount');
     const discardPileElement = document.getElementById('discardPile');
     
-    if (discardCountElement) {
-        discardCountElement.textContent = discardPile.length;
-    }
+    if (discardCountElement) discardCountElement.textContent = discardPile.length;
     
     if (discardPileElement) {
         if (discardPile.length > 0) {
             discardPileElement.innerHTML = `
-                <img src="cards/cover.png" 
-                     alt="Сброс" 
-                     class="card-img" 
+                <img src="cards/cover.png" alt="Сброс" class="card-img" 
                      style="width: 100px; height: 164px;"
                      onerror="this.src='cards/cover.png'">
                 <div class="discard-count-badge">${discardPile.length}</div>
@@ -768,12 +709,17 @@ function updateDiscardDisplay() {
 
 function isMyTurn() {
     if (turnOrder.length === 0) return false;
-    return turnOrder[currentTurnIndex] === playerName;
+    return turnOrder[currentTurnIndex] === myPlayerId;
 }
 
-// Действия мастера
+function isPlayerMaster(playerId) {
+    const player = players.find(p => p.id === playerId);
+    return player && player.role === 'master';
+}
+
+// ===== ДЕЙСТВИЯ МАСТЕРА =====
 function shuffleDeck() {
-    if (!isMaster()) return;
+    if (myPlayerRole !== 'master' && myPlayerRole !== 'both') return;
     if (cardsDealt) {
         showNotification('Нельзя перемешать колоду после раздачи', 'error');
         return;
@@ -787,46 +733,46 @@ function shuffleDeck() {
         setTimeout(() => deckElement.classList.remove('shuffle-animation'), 1000);
     }
     
-    saveGameState();
+    saveGameToFirebase();
     updateDeckDisplay();
     showNotification('Колода перемешана!', 'success');
 }
 
 function dealCards() {
-    if (!isMaster()) return;
+    if (myPlayerRole !== 'master' && myPlayerRole !== 'both') return;
     
     if (cardsDealt) {
-        const dealBtn = document.querySelector('.deck-btn[onclick="dealCards()"]');
-        if (dealBtn) {
-            dealBtn.classList.add('shake');
-            setTimeout(() => dealBtn.classList.remove('shake'), 1000);
-        }
         showNotification('Карты уже были розданы!', 'error');
         return;
     }
     
-    if (deck.length < players.length * 3) {
-        showNotification('Недостаточно карт в колоде для раздачи', 'error');
+    const gamePlayers = players.filter(p => p.role !== 'master');
+    
+    if (deck.length < gamePlayers.length * 3) {
+        showNotification('Недостаточно карт в колоде', 'error');
         return;
     }
     
     players.forEach(player => {
-        playerHands[player] = [];
+        playerHands[player.id] = [];
+    });
+    
+    gamePlayers.forEach(player => {
         for (let i = 0; i < 3; i++) {
             const card = deck.pop();
-            playerHands[player].push(card);
-            cardStates[card].owner = player;
+            playerHands[player.id].push(card);
+            cardStates[card].owner = player.id;
         }
     });
     
     cardsDealt = true;
-    saveGameState();
+    saveGameToFirebase();
     updateGameUI();
     showNotification('Карты розданы!', 'success');
 }
 
 function drawFirstCard() {
-    if (!isMaster()) return;
+    if (myPlayerRole !== 'master' && myPlayerRole !== 'both') return;
     if (firstCardDrawn) {
         showNotification('Первая карта уже на столе!', 'info');
         return;
@@ -835,36 +781,31 @@ function drawFirstCard() {
     firstCardDrawn = true;
     placeFirstCard();
     
-    saveGameState();
+    saveGameToFirebase();
     updateGameUI();
-    showNotification('Первая карта выложена на стол', 'success');
 }
 
 function masterDrawCard() {
-    if (!isMaster()) return;
-    if (deck.length === 0) {
-        showNotification('Колода пуста', 'error');
-        return;
-    }
+    if (myPlayerRole !== 'master' && myPlayerRole !== 'both') return;
+    if (deck.length === 0) return;
     
     const card = deck.pop();
     tableCards.push(card);
     cardStates[card].onTable = true;
     
-    saveGameState();
+    saveGameToFirebase();
     updateGameUI();
 }
 
-// Просмотр карт
+// ===== ПРОСМОТР КАРТ =====
 function viewTableCard(cardId) {
     showCardModal(cardId, false);
 }
 
 function viewHandCard(cardId) {
-    const isPlayerRole = playerRole === 'player' || playerRole === 'both';
-    if (!isPlayerRole) return;
+    if (myPlayerRole !== 'player' && myPlayerRole !== 'both') return;
     
-    const hand = playerHands[playerName] || [];
+    const hand = playerHands[myPlayerId] || [];
     if (hand.includes(cardId)) {
         showCardModal(cardId, true);
     }
@@ -909,18 +850,16 @@ function playCard(cardId) {
     closeCardModal();
     
     showConfirmModal('Вы уверены, что хотите выложить эту карту на стол?', () => {
-        const hand = playerHands[playerName];
+        const hand = playerHands[myPlayerId] || [];
         const index = hand.indexOf(cardId);
-        if (index > -1) {
-            hand.splice(index, 1);
-        }
+        if (index > -1) hand.splice(index, 1);
         
         tableCards.push(cardId);
         cardStates[cardId].onTable = true;
         cardStates[cardId].owner = null;
         
         playerMadeAction = true;
-        saveGameState();
+        saveGameToFirebase();
         updateGameUI();
         showNotification('Карта выложена на стол', 'success');
     });
@@ -930,25 +869,22 @@ function discardCard(cardId) {
     closeCardModal();
     
     showConfirmModal('Вы уверены, что хотите сбросить эту карту?', () => {
-        const hand = playerHands[playerName];
+        const hand = playerHands[myPlayerId] || [];
         const index = hand.indexOf(cardId);
-        if (index > -1) {
-            hand.splice(index, 1);
-        }
+        if (index > -1) hand.splice(index, 1);
         
         discardPile.push(cardId);
         cardStates[cardId].owner = null;
         
         playerMadeAction = true;
-        saveGameState();
+        saveGameToFirebase();
         updateGameUI();
         showNotification('Карта сброшена', 'info');
     });
 }
 
 function endTurn() {
-    const isPlayerRole = playerRole === 'player' || playerRole === 'both';
-    if (!isPlayerRole) return;
+    if (myPlayerRole !== 'player' && myPlayerRole !== 'both') return;
     
     if (!isMyTurn()) {
         showNotification('Сейчас не ваш ход', 'error');
@@ -956,29 +892,32 @@ function endTurn() {
     }
     
     if (!playerMadeAction) {
-        showNotification('Сначала нужно сделать ход - выложить или сбросить карту', 'error');
+        showNotification('Сначала нужно сделать ход', 'error');
         return;
     }
     
     if (deck.length > 0) {
-        const hand = playerHands[playerName];
-        const card = deck.pop();
-        hand.push(card);
-        cardStates[card].owner = playerName;
-        showNotification('Вы добрали карту из колоды', 'info');
+        const hand = playerHands[myPlayerId] || [];
+        hand.push(deck.pop());
+        showNotification('Вы добрали карту', 'info');
     }
     
-    currentTurnIndex = (currentTurnIndex + 1) % turnOrder.length;
+    do {
+        currentTurnIndex = (currentTurnIndex + 1) % turnOrder.length;
+    } while (turnOrder.length > 0 && isPlayerMaster(turnOrder[currentTurnIndex]));
+    
     playerMadeAction = false;
     
-    saveGameState();
+    saveGameToFirebase();
     updateGameUI();
-    showNotification(`Ход переходит к ${turnOrder[currentTurnIndex]}`, 'info');
+    
+    const nextPlayer = players.find(p => p.id === turnOrder[currentTurnIndex]);
+    showNotification(`Ход переходит к ${nextPlayer ? nextPlayer.name : '...'}`, 'info');
 }
 
-// Просмотр мастера
+// ===== ПРОСМОТР МАСТЕРА =====
 function masterViewHands() {
-    if (!isMaster()) return;
+    if (myPlayerRole !== 'master' && myPlayerRole !== 'both') return;
     
     const container = document.getElementById('masterViewContent');
     if (!container) return;
@@ -986,20 +925,19 @@ function masterViewHands() {
     container.innerHTML = '<h3>Руки игроков</h3>';
     
     players.forEach(player => {
-        const hand = playerHands[player] || [];
+        const hand = playerHands[player.id] || [];
         container.innerHTML += `
             <div style="margin-bottom: 20px;">
-                <h4>${player} (${hand.length} карт)</h4>
+                <h4>${player.name} (${hand.length} карт)${player.role === 'master' ? ' [Мастер]' : ''}</h4>
                 <div class="cards-grid">
-                    ${hand.map(cardId => `
+                    ${hand.length > 0 ? hand.map(cardId => `
                         <div class="card-in-grid" onclick="viewMasterCard(${cardId})">
                             <img src="cards/${String(cardId).padStart(2, '0')}.png" 
-                                 alt="Карта ${cardId}" 
-                                 class="card-img" 
+                                 alt="Карта ${cardId}" class="card-img" 
                                  style="width: 100px; height: 164px;"
                                  onerror="this.src='cards/cover.png'">
                         </div>
-                    `).join('')}
+                    `).join('') : '<p style="color: #888;">Нет карт</p>'}
                 </div>
             </div>
         `;
@@ -1007,7 +945,7 @@ function masterViewHands() {
 }
 
 function masterViewDiscard() {
-    if (!isMaster()) return;
+    if (myPlayerRole !== 'master' && myPlayerRole !== 'both') return;
     
     const container = document.getElementById('masterViewContent');
     if (!container) return;
@@ -1017,8 +955,7 @@ function masterViewDiscard() {
             ${discardPile.length > 0 ? discardPile.map(cardId => `
                 <div class="card-in-grid" onclick="viewMasterCard(${cardId})">
                     <img src="cards/${String(cardId).padStart(2, '0')}.png" 
-                         alt="Карта ${cardId}" 
-                         class="card-img" 
+                         alt="Карта ${cardId}" class="card-img" 
                          style="width: 100px; height: 164px;"
                          onerror="this.src='cards/cover.png'">
                 </div>
@@ -1027,7 +964,7 @@ function masterViewDiscard() {
 }
 
 function masterViewDeck() {
-    if (!isMaster()) return;
+    if (myPlayerRole !== 'master' && myPlayerRole !== 'both') return;
     
     const container = document.getElementById('masterViewContent');
     if (!container) return;
@@ -1037,8 +974,7 @@ function masterViewDeck() {
             ${deck.map(cardId => `
                 <div class="card-in-grid" onclick="viewMasterCard(${cardId})">
                     <img src="cards/${String(cardId).padStart(2, '0')}.png" 
-                         alt="Карта ${cardId}" 
-                         class="card-img" 
+                         alt="Карта ${cardId}" class="card-img" 
                          style="width: 100px; height: 164px;"
                          onerror="this.src='cards/cover.png'">
                 </div>
@@ -1056,16 +992,15 @@ function viewMasterCard(cardId) {
     image.src = `cards/${String(cardId).padStart(2, '0')}.png`;
     image.onerror = () => { image.src = 'cards/cover.png'; };
     actions.innerHTML = '';
-    
     modal.style.display = 'block';
 }
 
-// Завершение игры
+// ===== ЗАВЕРШЕНИЕ ИГРЫ =====
 function endGameWarning() {
-    if (!isMaster()) return;
+    if (myPlayerRole !== 'master' && myPlayerRole !== 'both') return;
     
     showConfirmModal('Вы уверены, что хотите завершить игру?', () => {
-        showConfirmModal('ТОЧНО завершить игру? Это действие нельзя отменить!', () => {
+        showConfirmModal('ТОЧНО завершить игру?', () => {
             showTest();
         });
     });
@@ -1074,7 +1009,6 @@ function endGameWarning() {
 function showTest() {
     const modal = document.getElementById('testModal');
     const container = document.getElementById('testContainer');
-    
     if (!modal || !container) return;
     
     container.innerHTML = testQuestions.map((q, i) => `
@@ -1094,71 +1028,63 @@ function showTest() {
 }
 
 function selectTestOption(label) {
-    const allLabels = label.parentElement.querySelectorAll('.test-option');
-    allLabels.forEach(l => l.classList.remove('selected'));
-    
+    label.parentElement.querySelectorAll('.test-option').forEach(l => l.classList.remove('selected'));
     label.classList.add('selected');
-    
     const radio = label.querySelector('input[type="radio"]');
-    if (radio) {
-        radio.checked = true;
-    }
+    if (radio) radio.checked = true;
 }
 
 function submitTest() {
     let score = 0;
-    
     testQuestions.forEach((q, i) => {
         const selected = document.querySelector(`input[name="q${i}"]:checked`);
-        if (selected && selected.value === q.correct) {
-            score += 2;
-        }
+        if (selected && selected.value === q.correct) score += 2;
     });
     
-    let trapCardsOnTable = tableCards.filter(cardId => TRAP_CARDS.includes(cardId)).length;
-    score -= trapCardsOnTable;
-    
-    let discardDeficit = Math.max(0, 6 - discardPile.length);
-    score -= discardDeficit * 3;
+    score -= tableCards.filter(cardId => TRAP_CARDS.includes(cardId)).length;
+    score -= Math.max(0, 6 - discardPile.length) * 3;
     
     showResults(score);
-    
-    const testModal = document.getElementById('testModal');
-    if (testModal) testModal.style.display = 'none';
+    document.getElementById('testModal').style.display = 'none';
 }
 
 function showResults(score) {
     const modal = document.getElementById('resultsModal');
     const container = document.getElementById('resultsContainer');
-    
     if (!modal || !container) return;
     
     container.innerHTML = `
         <p>Игра завершена!</p>
         <p style="font-size: 2em; color: ${score >= 10 ? '#4CAF50' : score >= 5 ? '#FFA000' : '#f44336'};">
-            Итоговый счет: ${score}
-        </p>
+            Итоговый счет: ${score}</p>
         <p>Карт-ловушек на столе: ${tableCards.filter(cardId => TRAP_CARDS.includes(cardId)).length}</p>
         <p>Карт в сбросе: ${discardPile.length} ${discardPile.length < 6 ? `(не хватает ${6 - discardPile.length})` : ''}</p>
         <button onclick="finalizeGameEnd()" class="modal-btn confirm-btn" style="margin-top: 20px;">Вернуться в главное меню</button>
     `;
-    
     modal.style.display = 'block';
 }
 
 function finalizeGameEnd() {
-    const modal = document.getElementById('resultsModal');
-    if (modal) modal.style.display = 'none';
+    document.getElementById('resultsModal').style.display = 'none';
     resetGame();
 }
 
 function closeResultsModal() {
-    const modal = document.getElementById('resultsModal');
-    if (modal) modal.style.display = 'none';
+    document.getElementById('resultsModal').style.display = 'none';
     resetGame();
 }
 
 function resetGame() {
+    if (firebaseReady) {
+        database.ref(`rooms/${ROOM_ID}`).remove();
+    }
+    
+    localStorage.removeItem('detectiveGame');
+    
+    myPlayerId = '';
+    myPlayerName = '';
+    myPlayerRole = '';
+    players = [];
     gameStarted = false;
     cardsDealt = false;
     firstCardDrawn = false;
@@ -1167,33 +1093,15 @@ function resetGame() {
     tableCards = [];
     playerHands = {};
     cardStates = {};
-    currentTurnIndex = 0;
     turnOrder = [];
-    playerName = '';
-    playerRole = '';
-    players = [];
+    currentTurnIndex = 0;
     playerMadeAction = false;
-    playerId = '';
-    
-    const state = { gameEnded: true };
-    localStorage.setItem('detectiveGame', JSON.stringify(state));
-    
-    if (firebaseReady && database) {
-        database.ref(`rooms/${ROOM_ID}`).remove();
-    }
+    lastLocalUpdate = null;
     
     showLoginPage();
 }
 
-// Вспомогательные функции
-function isMaster() {
-    return playerRole === 'master' || playerRole === 'both';
-}
-
-function isPlayer() {
-    return playerRole === 'player' || playerRole === 'both';
-}
-
+// ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
 function showConfirmModal(message, onConfirm) {
     const cardModal = document.getElementById('cardModal');
     if (cardModal) cardModal.style.display = 'none';
@@ -1205,7 +1113,6 @@ function showConfirmModal(message, onConfirm) {
     if (!modal || !messageEl || !confirmBtn) return;
     
     messageEl.textContent = message;
-    
     confirmBtn.onclick = () => {
         modal.style.display = 'none';
         onConfirm();
@@ -1242,9 +1149,7 @@ function toggleBackstory() {
 function showInfoModal(title, content) {
     const modal = document.getElementById('infoModal');
     const textEl = document.getElementById('infoModalText');
-    
     if (!modal || !textEl) return;
-    
     textEl.innerHTML = `<h2>${title}</h2>${content}`;
     modal.style.display = 'block';
 }
@@ -1256,34 +1161,16 @@ function closeInfoModal() {
 
 function toggleHand() {
     const handContent = document.getElementById('handContent');
-    if (handContent) {
-        handContent.classList.toggle('show');
-    }
+    if (handContent) handContent.classList.toggle('show');
 }
 
-// Закрытие модальных окон при клике вне их
 window.onclick = function(event) {
     if (event.target.classList.contains('modal')) {
         event.target.style.display = 'none';
     }
 }
 
-// Запуск при загрузке
 window.onload = function() {
-    console.log('Page loaded, starting init...');
-    init().catch(error => {
-        console.error('Init error:', error);
-        const localState = loadFromLocalStorage();
-        if (localState && localState.playerName) {
-            restoreGameState(localState);
-            playerId = localState.playerId || generatePlayerId();
-            if (gameStarted) {
-                showGamePage();
-            } else {
-                showLobbyPage();
-            }
-        } else {
-            showLoginPage();
-        }
-    });
+    console.log('Page loaded');
+    init();
 };
