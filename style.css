@@ -691,7 +691,6 @@ body {
     max-height: 80vh;
     overflow-y: auto;
     line-height: 1.6;
-    white-space: pre-line;
 }
 
 .test-modal-content, .results-modal-content {
