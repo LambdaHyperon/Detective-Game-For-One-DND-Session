@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Детективная карточная игра</title>
+    <title>Загадочное убийство в поезде "Серебрянный ключ"</title>
     <link rel="stylesheet" href="style.css">
     <!-- Firebase Scripts -->
     <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
@@ -14,7 +14,7 @@
         <!-- Страница 1: Вход -->
         <div id="login-page" class="page active">
             <div class="login-container">
-                <h1 class="game-title">Детективная карточная игра</h1>
+                <h1 class="game-title">Загадочное убийство в поезде "Серебрянный ключ"</h1>
                 <div class="login-form">
                     <input type="text" id="playerName" placeholder="Введите ваше имя" maxlength="20">
                     <button id="joinGame" onclick="joinGame()">Присоединиться к игре</button>
@@ -39,9 +39,9 @@
                 </div>
 
                 <div class="lobby-controls">
-                    <button onclick="toggleRules()" class="control-btn">📋 Правила</button>
-                    <button onclick="shuffleTurnOrder()" class="control-btn">🎲 Перемешать порядок ходов</button>
-                    <button onclick="startGame()" class="control-btn start-btn">🎮 Начать игру</button>
+                    <button onclick="toggleRules()" class="control-btn">Правила</button>
+                    <button onclick="shuffleTurnOrder()" class="control-btn">Перемешать порядок ходов</button>
+                    <button onclick="startGame()" class="control-btn start-btn">Начать игру</button>
                     <button onclick="leaveGame()" class="control-btn" style="background: #6b1a1a !important; border-color: #8b2020 !important; color: #f0e6d3 !important;">🚪 Покинуть игру</button>
                 </div>
 
@@ -58,9 +58,9 @@
                     <div class="game-title-bar">
                         <span id="currentPlayerTurn" class="turn-indicator"></span>
                         <div class="game-controls">
-                            <button onclick="toggleRules()" class="control-btn">📋 Правила</button>
-                            <button onclick="toggleBackstory()" class="control-btn">📖 Предыстория</button>
-                            <button id="endGameBtn" class="control-btn end-game-btn" onclick="endGameWarning()">🏁 Завершить игру</button>
+                            <button onclick="toggleRules()" class="control-btn">Правила</button>
+                            <button onclick="toggleBackstory()" class="control-btn">Предыстория</button>
+                            <button id="endGameBtn" class="control-btn end-game-btn" onclick="endGameWarning()">Завершить игру</button>
                         </div>
                     </div>
                 </div>
@@ -74,9 +74,9 @@
                             <img src="cards/cover.png" alt="Колода" class="card-img" style="width: 139px; height: 228px;">
                         </div>
                         <div class="master-deck-controls" id="masterDeckControls" style="display: none;">
-                            <button onclick="shuffleDeck()" class="deck-btn">🔀 Перемешать</button>
-                            <button onclick="dealCards()" class="deck-btn">🎴 Раздать</button>
-                            <button onclick="drawFirstCard()" class="deck-btn">🃏 Достать первую карту</button>
+                            <button onclick="shuffleDeck()" class="deck-btn">Перемешать</button>
+                            <button onclick="dealCards()" class="deck-btn">Раздать</button>
+                            <button onclick="drawFirstCard()" class="deck-btn">Достать первую карту</button>
                         </div>
                     </div>
 
@@ -110,7 +110,7 @@
         <!-- Область руки игрока -->
         <div id="playerHandArea" class="player-hand-area" style="display: none;">
             <div class="hand-toggle" onclick="toggleHand()">
-                <span>🃏 Карты в руке</span>
+                <span>Карты в руке</span>
                 <span id="handCount">0</span>
                 <span id="turnStatus" class="turn-status">Ожидайте своего хода</span>
             </div>
