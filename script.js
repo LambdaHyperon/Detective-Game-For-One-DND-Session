@@ -1256,7 +1256,19 @@ function showInfoModal(title, content) {
     const modal = document.getElementById('infoModal');
     const textEl = document.getElementById('infoModalText');
     if (!modal || !textEl) return;
-    textEl.innerHTML = `<h2>${title}</h2>${content}`;
+    
+    // Создаем временный div для обработки контента
+    const tempDiv = document.createElement('div');
+    tempDiv.innerHTML = `<h2>${title}</h2>${content}`;
+    
+    // Применяем white-space: pre-line ко всем текстовым элементам
+    tempDiv.querySelectorAll('p, i, b, span, div').forEach(el => {
+        el.style.whiteSpace = 'pre-line';
+    });
+    
+    textEl.innerHTML = '';
+    textEl.appendChild(tempDiv);
+    
     modal.style.display = 'block';
 }
 
