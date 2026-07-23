@@ -89,6 +89,9 @@ body {
     font-family: 'Georgia', serif;
     letter-spacing: 2px;
     position: relative;
+    max-width: 600px;
+    text-align: center;
+    line-height: 1.2;
 }
 
 .game-title::after {
