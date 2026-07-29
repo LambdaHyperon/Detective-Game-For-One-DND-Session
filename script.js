@@ -44,7 +44,7 @@ let tableCards = [];
 let playerHands = {};     // {playerId: [cardIds]}
 let cardStates = {};
 
-const TRAP_CARDS = Array.from({length: 13}, (_, i) => i + 20);
+const TRAP_CARDS = [3, 5, 11, 12, 14, 15, 16, 19, 22, 23, 26, 30];
 const FIRST_CARD = 1;
 let lastLocalUpdate = null;
 
